@@ -36,6 +36,7 @@ import {
   modules,
   theme as lightTheme,
 } from './constants';
+import { getInstalledAppVersion } from './appInfo';
 import styles from './styles';
 import type {
   AuthMode,
@@ -492,9 +493,10 @@ function MainApp() {
     }
     try {
       const platform = Platform.OS === 'ios' ? 'ios' : 'android';
+      const installedVersion = await getInstalledAppVersion(APP_CURRENT_VERSION);
       const url = new URL(`${API_BASE}/api/public/app-update`);
       url.searchParams.set('platform', platform);
-      url.searchParams.set('currentVersion', APP_CURRENT_VERSION);
+      url.searchParams.set('currentVersion', installedVersion);
 
       const res = await fetch(url.toString());
       const json = await parseResponseSafe(res);
@@ -502,7 +504,7 @@ function MainApp() {
         return;
       }
 
-      const currentVersion = String((json as any)?.currentVersion || APP_CURRENT_VERSION).trim() || APP_CURRENT_VERSION;
+      const currentVersion = String((json as any)?.currentVersion || installedVersion).trim() || installedVersion;
       const latestVersion = String((json as any)?.latestVersion || '').trim();
       const minimumSupportedVersion = String((json as any)?.minimumSupportedVersion || '').trim();
       const updateAvailableFromApi = Boolean((json as any)?.updateAvailable);

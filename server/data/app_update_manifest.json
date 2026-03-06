@@ -3,7 +3,7 @@
     "latestVersion": "1.0.0",
     "minimumSupportedVersion": "1.0.0",
     "mandatory": false,
-    "downloadUrl": "https://example.com/mobile-app-latest.apk",
+    "downloadUrl": "/static/app-updates/mobile-1.0.0.apk",
     "releaseNotes": "Bug fixes and performance improvements."
   },
   "ios": {

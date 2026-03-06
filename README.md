@@ -129,3 +129,60 @@ If your PM2 process name matches the folder name, the restart command would be:
 ```sh
 EC2_HOST=<your-ec2-host> ./scripts/ec2-run.sh pm2 restart mobile-web-application
 ```
+
+## Android Self Update
+
+The Android app already checks `GET /api/public/app-update` on startup and shows an update popup when a newer version is available.
+
+Relevant files:
+
+- app update check: `src/app/MainApp.tsx`
+- Android installed-version bridge: `src/app/appInfo.ts`
+- Android native module: `android/app/src/main/java/com/mobile/AppInfoModule.kt`
+- default manifest template: `server/data/app_update_manifest.json`
+- runtime manifest on EC2: `server/data/generated/app_update_manifest.json`
+- hosted APK directory on the server: `server/data/generated/app-updates/`
+
+For each Android release:
+
+1. Update the Android app version in `android/app/build.gradle`
+   - `versionCode` must increase every release
+   - `versionName` should match the manifest version, for example `1.0.1`
+2. Build the signed release APK.
+3. Publish the APK and update the manifest:
+
+```sh
+npm run publish:android-update -- android/app/build/outputs/apk/release/app-release.apk 1.0.1 --notes "Bug fixes and performance improvements."
+```
+
+This command:
+
+- copies the APK to `server/data/generated/app-updates/mobile-1.0.1.apk`
+- updates `server/data/generated/app_update_manifest.json`
+- sets the Android download URL to `/static/app-updates/mobile-1.0.1.apk`
+
+Optional flags:
+
+```sh
+--mandatory
+--min-supported 1.0.0
+--notes "Your release notes"
+```
+
+Then restart the backend on EC2 or wait for the manifest cache to expire:
+
+```sh
+APP_ENV=production pm2 restart mobile-api --update-env
+```
+
+Test the update endpoint:
+
+```sh
+curl "http://13.235.49.124:4000/api/public/app-update?platform=android&currentVersion=1.0.0"
+```
+
+Important:
+
+- this is not silent install; Android will open the APK link and the user still installs it through the system installer
+- users may need to allow installs from unknown apps on their device
+- for production, prefer HTTPS and a domain instead of a raw HTTP IP

@@ -19,6 +19,7 @@ const ITEM_UPLOAD_DIR = path.join(STATIC_ROOT, 'product-images', 'items');
 const MAX_ITEM_UPLOAD_COUNT = config.uploads.maxItemUploadCount;
 const MAX_ITEM_UPLOAD_BYTES = config.uploads.maxItemUploadBytes;
 const APP_UPDATE_MANIFEST_PATH = path.join(__dirname, 'data', 'app_update_manifest.json');
+const APP_UPDATE_RUNTIME_MANIFEST_PATH = path.join(STATIC_ROOT, 'app_update_manifest.json');
 const APP_UPDATE_MANIFEST_CACHE_MS = config.appUpdateManifestCacheMs;
 
 const mysqlPool = mysql.createPool({
@@ -154,21 +155,25 @@ async function readAppUpdateManifest() {
   }
 
   const fallbackManifest = getDefaultAppUpdateManifest();
-  try {
-    const raw = await fs.promises.readFile(APP_UPDATE_MANIFEST_PATH, 'utf8');
-    const parsed = JSON.parse(raw);
-    const manifest = {
-      android: normalizeAppUpdateEntry(parsed?.android, fallbackManifest.android.latestVersion),
-      ios: normalizeAppUpdateEntry(parsed?.ios, fallbackManifest.ios.latestVersion),
-    };
-    appUpdateManifestCache = manifest;
-    appUpdateManifestLoadedAt = now;
-    return manifest;
-  } catch {
-    appUpdateManifestCache = fallbackManifest;
-    appUpdateManifestLoadedAt = now;
-    return fallbackManifest;
+  for (const manifestPath of [APP_UPDATE_RUNTIME_MANIFEST_PATH, APP_UPDATE_MANIFEST_PATH]) {
+    try {
+      const raw = await fs.promises.readFile(manifestPath, 'utf8');
+      const parsed = JSON.parse(raw);
+      const manifest = {
+        android: normalizeAppUpdateEntry(parsed?.android, fallbackManifest.android.latestVersion),
+        ios: normalizeAppUpdateEntry(parsed?.ios, fallbackManifest.ios.latestVersion),
+      };
+      appUpdateManifestCache = manifest;
+      appUpdateManifestLoadedAt = now;
+      return manifest;
+    } catch {
+      // Try the next manifest source.
+    }
   }
+
+  appUpdateManifestCache = fallbackManifest;
+  appUpdateManifestLoadedAt = now;
+  return fallbackManifest;
 }
 
 function computeStatus(qty, reorderPoint = 8) {
@@ -2105,6 +2110,7 @@ function parseBool(value, fallback = false) {
 
 function getContentTypeForAsset(filePath) {
   const ext = path.extname(filePath).toLowerCase();
+  if (ext === '.apk') return 'application/vnd.android.package-archive';
   if (ext === '.png') return 'image/png';
   if (ext === '.jpg' || ext === '.jpeg') return 'image/jpeg';
   if (ext === '.webp') return 'image/webp';
@@ -2792,7 +2798,7 @@ const server = http.createServer(async (req, res) => {
         mandatory: forceUpdate,
         updateAvailable,
         forceUpdate,
-        downloadUrl: entry.downloadUrl,
+        downloadUrl: resolveAssetUrl(req, entry.downloadUrl),
         releaseNotes: entry.releaseNotes,
       });
       return;
