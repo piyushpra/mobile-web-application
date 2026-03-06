@@ -41,6 +41,16 @@ import {
   theme as lightTheme,
 } from './constants';
 import { getInstalledAppVersion } from './appInfo';
+import {
+  addAppUpdateDownloadListener,
+  cancelAppUpdateDownload,
+  installDownloadedAppUpdate,
+  isAppUpdateInstallerAvailable,
+  isInstallPermissionGranted,
+  openInstallPermissionSettings,
+  startAppUpdateDownload,
+  type AppUpdateDownloadEvent,
+} from './appUpdateInstaller';
 import styles from './styles';
 import type {
   AuthMode,
@@ -103,6 +113,19 @@ type ApiRequestOptions = RequestInit & {
   skipAuth?: boolean;
 };
 
+type AppUpdateInfo = {
+  currentVersion: string;
+  latestVersion: string;
+  minimumSupportedVersion: string;
+  forceUpdate: boolean;
+  mandatory: boolean;
+  downloadUrl: string;
+  releaseNotes: string;
+  publishedAt: string;
+  checksumSha256: string;
+  fileSizeBytes: number;
+};
+
 const MAX_ITEM_IMAGES = 5;
 const AUTH_TOKEN_STORAGE_KEY = '@mobile/auth_token';
 const AUTH_USER_STORAGE_KEY = '@mobile/auth_user';
@@ -154,6 +177,23 @@ function toFeatureChipLabel(value: string) {
   return normalized.toLowerCase().replace(/\b[a-z]/g, match => match.toUpperCase());
 }
 
+function formatByteSize(value: number) {
+  const size = Number(value || 0);
+  if (!Number.isFinite(size) || size <= 0) {
+    return '0 B';
+  }
+  if (size >= 1024 * 1024 * 1024) {
+    return `${(size / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+  }
+  if (size >= 1024 * 1024) {
+    return `${(size / (1024 * 1024)).toFixed(1)} MB`;
+  }
+  if (size >= 1024) {
+    return `${Math.round(size / 1024)} KB`;
+  }
+  return `${Math.round(size)} B`;
+}
+
 function toFetchError(url: string, err: unknown, fallback = 'Request failed') {
   const message = err instanceof Error ? err.message : fallback;
   return new Error(`${message} [${url}]`);
@@ -181,6 +221,16 @@ function MainApp() {
   const [isSaving, setIsSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
+  const [availableAppUpdate, setAvailableAppUpdate] = useState<AppUpdateInfo | null>(null);
+  const [isAppUpdateModalVisible, setIsAppUpdateModalVisible] = useState(false);
+  const [appUpdateDownloadProgress, setAppUpdateDownloadProgress] = useState(0);
+  const [appUpdateDownloadedBytes, setAppUpdateDownloadedBytes] = useState(0);
+  const [appUpdateTotalBytes, setAppUpdateTotalBytes] = useState(0);
+  const [appUpdateDownloadStatus, setAppUpdateDownloadStatus] = useState<
+    'idle' | 'starting' | 'downloading' | 'downloaded' | 'installing' | 'permission_required' | 'cancelled' | 'error'
+  >('idle');
+  const [appUpdateStatusMessage, setAppUpdateStatusMessage] = useState('');
+  const [appUpdateError, setAppUpdateError] = useState<string | null>(null);
 
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
@@ -529,6 +579,80 @@ function MainApp() {
     Alert.alert(title, message || fallback);
   };
 
+  const closeAppUpdateModal = async (skipVersion = false) => {
+    if (skipVersion && availableAppUpdate && !availableAppUpdate.forceUpdate) {
+      await AsyncStorage.setItem(APP_UPDATE_SKIP_VERSION_STORAGE_KEY, availableAppUpdate.latestVersion);
+    }
+    setIsAppUpdateModalVisible(false);
+    setAppUpdateError(null);
+    if (!skipVersion && appUpdateDownloadStatus === 'idle') {
+      setAppUpdateStatusMessage('');
+    }
+  };
+
+  const startInAppUpdateDownload = async () => {
+    if (!availableAppUpdate) {
+      return;
+    }
+    try {
+      setAppUpdateError(null);
+      setAppUpdateDownloadProgress(0);
+      setAppUpdateDownloadedBytes(0);
+      setAppUpdateTotalBytes(availableAppUpdate.fileSizeBytes || 0);
+      setAppUpdateDownloadStatus('starting');
+      setAppUpdateStatusMessage('Preparing update download...');
+      await startAppUpdateDownload(
+        availableAppUpdate.downloadUrl,
+        `mobile-${availableAppUpdate.latestVersion}.apk`,
+        availableAppUpdate.checksumSha256,
+      );
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Unable to start update download';
+      setAppUpdateDownloadStatus('error');
+      setAppUpdateError(message);
+      setAppUpdateStatusMessage(message);
+    }
+  };
+
+  const handleInstallDownloadedUpdate = async () => {
+    try {
+      setAppUpdateError(null);
+      await installDownloadedAppUpdate();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Unable to open installer';
+      setAppUpdateDownloadStatus('error');
+      setAppUpdateError(message);
+      setAppUpdateStatusMessage(message);
+    }
+  };
+
+  const handleOpenInstallPermissionSettings = async () => {
+    try {
+      await openInstallPermissionSettings();
+      const isGranted = await isInstallPermissionGranted().catch(() => false);
+      if (isGranted) {
+        await handleInstallDownloadedUpdate();
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Unable to open install settings';
+      setAppUpdateError(message);
+      setAppUpdateStatusMessage(message);
+    }
+  };
+
+  const handleCancelAppUpdateDownload = async () => {
+    try {
+      const cancelled = await cancelAppUpdateDownload();
+      if (cancelled) {
+        setAppUpdateStatusMessage('Cancelling update download...');
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Unable to cancel update download';
+      setAppUpdateError(message);
+      setAppUpdateStatusMessage(message);
+    }
+  };
+
   const checkForAppUpdate = async () => {
     if (appUpdatePromptedRef.current || typeof fetch !== 'function') {
       return;
@@ -577,8 +701,33 @@ function MainApp() {
 
       appUpdatePromptedRef.current = true;
       const releaseNotes = String((json as any)?.releaseNotes || '').trim();
-      const messageParts = [`Current: ${currentVersion}`, `Latest: ${latestVersion}`];
       const publishedAt = String((json as any)?.publishedAt || '').trim();
+      const nextUpdateInfo: AppUpdateInfo = {
+        currentVersion,
+        latestVersion,
+        minimumSupportedVersion,
+        forceUpdate,
+        mandatory: forceUpdate,
+        downloadUrl,
+        releaseNotes,
+        publishedAt,
+        checksumSha256: String((json as any)?.checksumSha256 || '').trim(),
+        fileSizeBytes: Math.max(0, Number((json as any)?.fileSizeBytes || 0)),
+      };
+
+      if (platform === 'android' && isAppUpdateInstallerAvailable()) {
+        setAvailableAppUpdate(nextUpdateInfo);
+        setAppUpdateDownloadStatus('idle');
+        setAppUpdateDownloadProgress(0);
+        setAppUpdateDownloadedBytes(0);
+        setAppUpdateTotalBytes(nextUpdateInfo.fileSizeBytes || 0);
+        setAppUpdateError(null);
+        setAppUpdateStatusMessage('');
+        setIsAppUpdateModalVisible(true);
+        return;
+      }
+
+      const messageParts = [`Current: ${currentVersion}`, `Latest: ${latestVersion}`];
       if (publishedAt) {
         messageParts.push(`Published: ${publishedAt}`);
       }
@@ -610,7 +759,6 @@ function MainApp() {
           style: 'cancel',
           onPress: () => {
             void AsyncStorage.setItem(APP_UPDATE_SKIP_VERSION_STORAGE_KEY, latestVersion);
-            appUpdatePromptedRef.current = false;
           },
         },
         { text: 'Update Now', onPress: () => void openUpdateUrl() },
@@ -1908,6 +2056,36 @@ function MainApp() {
   }, []);
 
   useEffect(() => {
+    const subscription = addAppUpdateDownloadListener((event: AppUpdateDownloadEvent) => {
+      if (typeof event.progress === 'number') {
+        setAppUpdateDownloadProgress(Math.max(0, Math.min(1, event.progress)));
+      }
+      if (typeof event.downloadedBytes === 'number') {
+        setAppUpdateDownloadedBytes(Math.max(0, event.downloadedBytes));
+      }
+      if (typeof event.totalBytes === 'number') {
+        setAppUpdateTotalBytes(Math.max(0, event.totalBytes));
+      }
+      if (event.status) {
+        setAppUpdateDownloadStatus(event.status);
+      }
+      if (event.message) {
+        setAppUpdateStatusMessage(event.message);
+      }
+      if (event.status === 'error') {
+        setAppUpdateError(event.message || 'Unable to download update');
+      } else if (event.status === 'cancelled') {
+        setAppUpdateError(null);
+      } else if (event.status === 'downloaded' || event.status === 'installing' || event.status === 'permission_required') {
+        setAppUpdateError(null);
+      }
+    });
+    return () => {
+      subscription.remove();
+    };
+  }, []);
+
+  useEffect(() => {
     skipNextCartSyncRef.current = true;
     setIsStorefrontHydrated(false);
     loadStorefrontState();
@@ -2710,6 +2888,12 @@ function MainApp() {
     }),
     [isDarkMode, theme],
   );
+  const isAppUpdateBusy = appUpdateDownloadStatus === 'starting' || appUpdateDownloadStatus === 'downloading';
+  const isAppUpdateReadyToInstall =
+    appUpdateDownloadStatus === 'downloaded' ||
+    appUpdateDownloadStatus === 'installing' ||
+    appUpdateDownloadStatus === 'permission_required';
+  const appUpdateProgressPercent = Math.max(0, Math.min(100, Math.round(appUpdateDownloadProgress * 100)));
   const isSelectedCapacityAvailable = useMemo(
     () => selectedProductAvailableCapacities.includes(selectedCapacity),
     [selectedProductAvailableCapacities, selectedCapacity],
@@ -3377,6 +3561,128 @@ function MainApp() {
                 <Pressable style={styles.profileEditSaveBtn} onPress={saveProfileEdits}>
                   <Text style={styles.profileEditSaveText}>Save</Text>
                 </Pressable>
+              </View>
+            </View>
+          </SafeAreaView>
+        </Modal>
+
+        <Modal
+          visible={isAppUpdateModalVisible && Boolean(availableAppUpdate)}
+          animationType="fade"
+          transparent
+          onRequestClose={() => {
+            if (!availableAppUpdate?.forceUpdate && !isAppUpdateBusy) {
+              void closeAppUpdateModal();
+            }
+          }}
+        >
+          <SafeAreaView style={styles.updateModalBackdrop}>
+            <View style={[styles.updateModalCard, { backgroundColor: theme.panel, borderColor: theme.steel }]}>
+              <Text style={[styles.updateModalEyebrow, { color: availableAppUpdate?.forceUpdate ? theme.orange : theme.accent }]}>
+                {availableAppUpdate?.forceUpdate ? 'Update Required' : 'Update Available'}
+              </Text>
+              <Text style={[styles.updateModalTitle, { color: theme.text }]}>
+                Version {availableAppUpdate?.latestVersion || APP_CURRENT_VERSION} is ready
+              </Text>
+              <Text style={[styles.updateModalSubtitle, { color: theme.subtext }]}>
+                Current {availableAppUpdate?.currentVersion || APP_CURRENT_VERSION}
+                {'  '}•{'  '}
+                Minimum {availableAppUpdate?.minimumSupportedVersion || APP_CURRENT_VERSION}
+              </Text>
+              {availableAppUpdate?.publishedAt ? (
+                <Text style={[styles.updateModalMeta, { color: theme.subtext }]}>
+                  Published {availableAppUpdate.publishedAt}
+                </Text>
+              ) : null}
+              {availableAppUpdate?.fileSizeBytes ? (
+                <Text style={[styles.updateModalMeta, { color: theme.subtext }]}>
+                  Download size {formatByteSize(availableAppUpdate.fileSizeBytes)}
+                </Text>
+              ) : null}
+
+              {availableAppUpdate?.releaseNotes ? (
+                <View style={[styles.updateModalNotesCard, { backgroundColor: isDarkMode ? theme.panelSoft : '#F7FAF6', borderColor: theme.steel }]}>
+                  <Text style={[styles.updateModalNotesLabel, { color: theme.text }]}>Release Notes</Text>
+                  <Text style={[styles.updateModalNotesText, { color: theme.subtext }]}>{availableAppUpdate.releaseNotes}</Text>
+                </View>
+              ) : null}
+
+              <View style={styles.updateModalProgressWrap}>
+                <View style={[styles.updateModalProgressTrack, { backgroundColor: isDarkMode ? '#1F2937' : '#E5E7EB' }]}>
+                  <View
+                    style={[
+                      styles.updateModalProgressFill,
+                      {
+                        width: `${isAppUpdateBusy || isAppUpdateReadyToInstall ? Math.max(appUpdateProgressPercent, isAppUpdateReadyToInstall ? 100 : 6) : 0}%`,
+                        backgroundColor: theme.primary,
+                      },
+                    ]}
+                  />
+                </View>
+                <View style={styles.updateModalProgressMetaRow}>
+                  <Text style={[styles.updateModalProgressLabel, { color: theme.text }]}>
+                    {appUpdateStatusMessage ||
+                      (isAppUpdateBusy
+                        ? 'Downloading update...'
+                        : isAppUpdateReadyToInstall
+                          ? 'Update downloaded'
+                          : 'Ready to download')}
+                  </Text>
+                  <Text style={[styles.updateModalProgressValue, { color: theme.subtext }]}>
+                    {isAppUpdateBusy || isAppUpdateReadyToInstall
+                      ? `${appUpdateProgressPercent}%`
+                      : formatByteSize(availableAppUpdate?.fileSizeBytes || 0)}
+                  </Text>
+                </View>
+                {(appUpdateDownloadedBytes > 0 || appUpdateTotalBytes > 0) && (
+                  <Text style={[styles.updateModalProgressMeta, { color: theme.subtext }]}>
+                    {formatByteSize(appUpdateDownloadedBytes)} / {formatByteSize(appUpdateTotalBytes || availableAppUpdate?.fileSizeBytes || 0)}
+                  </Text>
+                )}
+                {appUpdateError ? (
+                  <Text style={[styles.updateModalError, { color: theme.danger }]}>{appUpdateError}</Text>
+                ) : null}
+              </View>
+
+              <View style={styles.updateModalActions}>
+                {!availableAppUpdate?.forceUpdate ? (
+                  <Pressable
+                    style={[styles.updateModalSecondaryBtn, { borderColor: theme.steel, backgroundColor: isDarkMode ? theme.panelSoft : '#FFFFFF' }]}
+                    disabled={isAppUpdateBusy}
+                    onPress={() => void closeAppUpdateModal(true)}
+                  >
+                    <Text style={[styles.updateModalSecondaryText, { color: theme.text }]}>Later</Text>
+                  </Pressable>
+                ) : null}
+
+                {appUpdateDownloadStatus === 'permission_required' ? (
+                  <>
+                    <Pressable
+                      style={[styles.updateModalSecondaryBtn, { borderColor: theme.steel, backgroundColor: isDarkMode ? theme.panelSoft : '#FFFFFF' }]}
+                      onPress={() => void handleOpenInstallPermissionSettings()}
+                    >
+                      <Text style={[styles.updateModalSecondaryText, { color: theme.text }]}>Open Settings</Text>
+                    </Pressable>
+                    <Pressable style={[styles.updateModalPrimaryBtn, { backgroundColor: theme.primary }]} onPress={() => void handleInstallDownloadedUpdate()}>
+                      <Text style={styles.updateModalPrimaryText}>Install Update</Text>
+                    </Pressable>
+                  </>
+                ) : isAppUpdateReadyToInstall ? (
+                  <Pressable style={[styles.updateModalPrimaryBtn, { backgroundColor: theme.primary }]} onPress={() => void handleInstallDownloadedUpdate()}>
+                    <Text style={styles.updateModalPrimaryText}>Install Update</Text>
+                  </Pressable>
+                ) : isAppUpdateBusy ? (
+                  <Pressable
+                    style={[styles.updateModalPrimaryBtn, { backgroundColor: theme.orange }]}
+                    onPress={() => void handleCancelAppUpdateDownload()}
+                  >
+                    <Text style={styles.updateModalPrimaryText}>Cancel Download</Text>
+                  </Pressable>
+                ) : (
+                  <Pressable style={[styles.updateModalPrimaryBtn, { backgroundColor: theme.primary }]} onPress={() => void startInAppUpdateDownload()}>
+                    <Text style={styles.updateModalPrimaryText}>Download Update</Text>
+                  </Pressable>
+                )}
               </View>
             </View>
           </SafeAreaView>
