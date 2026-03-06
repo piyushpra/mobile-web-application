@@ -15,3 +15,6 @@ echo 'export ANDROID_HOME=$HOME/Library/Android/sdk' >> ~/.zshrc
 echo 'export PATH=$PATH:$ANDROID_HOME/emulator:$ANDROID_HOME/platform-tools:$ANDROID_HOME/cmdline-tools/latest/bin' >> ~/.zshrc
 
 source ~/.zshrc
+
+to build android
+-> ./android/gradlew -p android assembleRelease
