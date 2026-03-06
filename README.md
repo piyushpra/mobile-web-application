@@ -160,12 +160,15 @@ This command:
 - copies the APK to `server/data/generated/app-updates/mobile-1.0.1.apk`
 - updates `server/data/generated/app_update_manifest.json`
 - sets the Android download URL to `/static/app-updates/mobile-1.0.1.apk`
+- calculates and stores `checksumSha256`, `fileSizeBytes`, and `publishedAt`
 
 Optional flags:
 
 ```sh
 --mandatory
 --min-supported 1.0.0
+--app-id com.mobile
+--channel production
 --notes "Your release notes"
 ```
 
@@ -178,11 +181,12 @@ APP_ENV=production pm2 restart mobile-api --update-env
 Test the update endpoint:
 
 ```sh
-curl "http://13.235.49.124:4000/api/public/app-update?platform=android&currentVersion=1.0.0"
+curl "http://13.235.49.124:4000/api/public/app-update?appId=com.mobile&channel=production&platform=android&currentVersion=1.0.0"
 ```
 
 Important:
 
 - this is not silent install; Android will open the APK link and the user still installs it through the system installer
 - users may need to allow installs from unknown apps on their device
+- use a release keystore for long-term updates; debug signing is only a fallback for testing
 - for production, prefer HTTPS and a domain instead of a raw HTTP IP

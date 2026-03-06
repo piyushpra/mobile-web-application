@@ -1,16 +1,26 @@
 {
   "android": {
+    "appId": "com.mobile",
+    "channel": "production",
     "latestVersion": "1.0.0",
     "minimumSupportedVersion": "1.0.0",
     "mandatory": false,
     "downloadUrl": "/static/app-updates/mobile-1.0.0.apk",
-    "releaseNotes": "Bug fixes and performance improvements."
+    "releaseNotes": "Bug fixes and performance improvements.",
+    "publishedAt": "",
+    "checksumSha256": "",
+    "fileSizeBytes": 0
   },
   "ios": {
+    "appId": "",
+    "channel": "production",
     "latestVersion": "1.0.0",
     "minimumSupportedVersion": "1.0.0",
     "mandatory": false,
     "downloadUrl": "https://apps.apple.com/app/id0000000000",
-    "releaseNotes": "Bug fixes and performance improvements."
+    "releaseNotes": "Bug fixes and performance improvements.",
+    "publishedAt": "",
+    "checksumSha256": "",
+    "fileSizeBytes": 0
   }
 }

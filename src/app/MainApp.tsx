@@ -29,6 +29,8 @@ import PublicFooter from './components/public/PublicFooter';
 import {
   API_BASE,
   APP_CURRENT_VERSION,
+  APP_UPDATE_APP_ID,
+  APP_UPDATE_CHANNEL,
   FOOTER_LOGO_IMAGE,
   FUELECTRIC_LOGO_IMAGE,
   LANDING_HERO_IMAGE,
@@ -495,6 +497,8 @@ function MainApp() {
       const platform = Platform.OS === 'ios' ? 'ios' : 'android';
       const installedVersion = await getInstalledAppVersion(APP_CURRENT_VERSION);
       const url = new URL(`${API_BASE}/api/public/app-update`);
+      url.searchParams.set('appId', APP_UPDATE_APP_ID);
+      url.searchParams.set('channel', APP_UPDATE_CHANNEL);
       url.searchParams.set('platform', platform);
       url.searchParams.set('currentVersion', installedVersion);
 
@@ -534,6 +538,10 @@ function MainApp() {
       appUpdatePromptedRef.current = true;
       const releaseNotes = String((json as any)?.releaseNotes || '').trim();
       const messageParts = [`Current: ${currentVersion}`, `Latest: ${latestVersion}`];
+      const publishedAt = String((json as any)?.publishedAt || '').trim();
+      if (publishedAt) {
+        messageParts.push(`Published: ${publishedAt}`);
+      }
       if (releaseNotes) {
         messageParts.push('', releaseNotes);
       }

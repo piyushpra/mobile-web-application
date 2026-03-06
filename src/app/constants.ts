@@ -36,6 +36,8 @@ export const API_BASE = Platform.select({
   default: 'http://13.235.49.124',
 });
 export const APP_CURRENT_VERSION = '1.0.0';
+export const APP_UPDATE_APP_ID = 'com.mobile';
+export const APP_UPDATE_CHANNEL = 'production';
 
 export const LANDING_HERO_IMAGE = require('../assets/images/land-page-bg.png');
 export const APP_LOGO_IMAGE = require('../assets/images/icon.png');

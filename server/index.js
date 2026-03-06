@@ -119,18 +119,28 @@ function compareAppVersions(left, right) {
 function getDefaultAppUpdateManifest() {
   return {
     android: {
+      appId: 'com.mobile',
+      channel: 'production',
       latestVersion: '1.0.0',
       minimumSupportedVersion: '1.0.0',
       mandatory: false,
       downloadUrl: '',
       releaseNotes: '',
+      publishedAt: '',
+      checksumSha256: '',
+      fileSizeBytes: 0,
     },
     ios: {
+      appId: '',
+      channel: 'production',
       latestVersion: '1.0.0',
       minimumSupportedVersion: '1.0.0',
       mandatory: false,
       downloadUrl: '',
       releaseNotes: '',
+      publishedAt: '',
+      checksumSha256: '',
+      fileSizeBytes: 0,
     },
   };
 }
@@ -140,11 +150,16 @@ function normalizeAppUpdateEntry(entry, fallbackVersion = '1.0.0') {
   const latestVersion = String(entry?.latestVersion || fallback).trim() || fallback;
   const minimumSupportedVersion = String(entry?.minimumSupportedVersion || latestVersion).trim() || latestVersion;
   return {
+    appId: String(entry?.appId || '').trim(),
+    channel: String(entry?.channel || 'production').trim().toLowerCase() || 'production',
     latestVersion,
     minimumSupportedVersion,
     mandatory: Boolean(entry?.mandatory),
     downloadUrl: String(entry?.downloadUrl || '').trim(),
     releaseNotes: String(entry?.releaseNotes || '').trim(),
+    publishedAt: String(entry?.publishedAt || '').trim(),
+    checksumSha256: String(entry?.checksumSha256 || '').trim().toLowerCase(),
+    fileSizeBytes: Math.max(0, parseNumber(entry?.fileSizeBytes, 0)),
   };
 }
 
@@ -1923,12 +1938,13 @@ function writeDb(db) {
   return writeQueue;
 }
 
-function sendJson(res, status, payload) {
+function sendJson(res, status, payload, extraHeaders = null) {
   res.writeHead(status, {
     'Content-Type': 'application/json',
     'Access-Control-Allow-Origin': '*',
     'Access-Control-Allow-Methods': 'GET,POST,PATCH,DELETE,OPTIONS',
     'Access-Control-Allow-Headers': 'Content-Type,Authorization',
+    ...(extraHeaders || {}),
   });
   res.end(JSON.stringify(payload));
 }
@@ -2166,13 +2182,19 @@ async function serveStaticAsset(req, res, pathname) {
       return;
     }
     const contentType = getContentTypeForAsset(absolutePath);
-    res.writeHead(200, {
+    const headers = {
       'Content-Type': contentType,
+      'Content-Length': String(stats.size),
       'Cache-Control': 'public, max-age=86400',
       'Access-Control-Allow-Origin': '*',
       'Access-Control-Allow-Methods': 'GET,HEAD,OPTIONS',
       'Access-Control-Allow-Headers': 'Content-Type,Authorization',
-    });
+      'X-Content-Type-Options': 'nosniff',
+    };
+    if (contentType === 'application/vnd.android.package-archive') {
+      headers['Content-Disposition'] = `attachment; filename="${path.basename(absolutePath)}"`;
+    }
+    res.writeHead(200, headers);
     if (req.method === 'HEAD') {
       res.end();
       return;
@@ -2781,16 +2803,32 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (pathname === '/api/public/app-update' && req.method === 'GET') {
+      const appId = String(searchParams.get('appId') || '').trim();
+      const channel = String(searchParams.get('channel') || 'production').trim().toLowerCase() || 'production';
       const platformRaw = String(searchParams.get('platform') || '').trim().toLowerCase();
-      const platform = platformRaw === 'ios' ? 'ios' : 'android';
+      if (platformRaw !== 'android' && platformRaw !== 'ios') {
+        sendError(res, 400, 'Invalid platform');
+        return;
+      }
+      const platform = platformRaw;
       const currentVersion = String(searchParams.get('currentVersion') || '').trim() || '0.0.0';
       const manifest = await readAppUpdateManifest();
       const entry = platform === 'ios' ? manifest.ios : manifest.android;
+      if (entry.channel && entry.channel !== channel) {
+        sendError(res, 404, 'Update manifest not found');
+        return;
+      }
+      if (platform === 'android' && appId && entry.appId && entry.appId !== appId) {
+        sendError(res, 404, 'Update manifest not found');
+        return;
+      }
       const updateAvailable = compareAppVersions(entry.latestVersion, currentVersion) > 0;
       const minVersionRequiresUpdate = compareAppVersions(entry.minimumSupportedVersion, currentVersion) > 0;
       const forceUpdate = minVersionRequiresUpdate || (entry.mandatory && updateAvailable);
 
       sendJson(res, 200, {
+        appId: entry.appId,
+        channel: entry.channel,
         platform,
         currentVersion,
         latestVersion: entry.latestVersion,
@@ -2800,6 +2838,11 @@ const server = http.createServer(async (req, res) => {
         forceUpdate,
         downloadUrl: resolveAssetUrl(req, entry.downloadUrl),
         releaseNotes: entry.releaseNotes,
+        publishedAt: entry.publishedAt,
+        checksumSha256: entry.checksumSha256,
+        fileSizeBytes: entry.fileSizeBytes,
+      }, {
+        'Cache-Control': 'no-store, max-age=0',
       });
       return;
     }
