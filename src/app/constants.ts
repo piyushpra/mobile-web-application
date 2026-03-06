@@ -31,9 +31,9 @@ export const darkTheme: Theme = {
 };
 
 export const API_BASE = Platform.select({
-  android: 'http://10.0.2.2:4000',
-  ios: 'http://localhost:4000',
-  default: 'http://localhost:4000',
+  android: 'http://13.235.49.124',
+  ios: 'http://13.235.49.124',
+  default: 'http://13.235.49.124',
 });
 export const APP_CURRENT_VERSION = '1.0.0';
 
