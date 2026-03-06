@@ -26,7 +26,16 @@ import ListRow from './components/ListRow';
 import PublicCatalogSections from './components/public/PublicCatalogSections';
 import PublicFeedbackPage from './components/public/PublicFeedbackPage';
 import PublicFooter from './components/public/PublicFooter';
-import { API_BASE, FUELECTRIC_LOGO_IMAGE, LANDING_HERO_IMAGE, darkTheme, modules, theme as lightTheme } from './constants';
+import {
+  API_BASE,
+  APP_CURRENT_VERSION,
+  FOOTER_LOGO_IMAGE,
+  FUELECTRIC_LOGO_IMAGE,
+  LANDING_HERO_IMAGE,
+  darkTheme,
+  modules,
+  theme as lightTheme,
+} from './constants';
 import styles from './styles';
 import type {
   AuthMode,
@@ -87,6 +96,8 @@ type NativePickerImage = {
 const MAX_ITEM_IMAGES = 5;
 const AUTH_TOKEN_STORAGE_KEY = '@mobile/auth_token';
 const AUTH_USER_STORAGE_KEY = '@mobile/auth_user';
+const GUEST_DARK_MODE_STORAGE_KEY = '@mobile/guest_dark_mode';
+const APP_UPDATE_SKIP_VERSION_STORAGE_KEY = '@mobile/app_update_skipped_version';
 
 function getFilledItemImageUrls(urls: string[]) {
   return urls.map(url => String(url || '').trim()).filter(Boolean);
@@ -104,6 +115,25 @@ function isHttpUrl(url: string) {
 function isAllowedItemImageUrl(url: string) {
   const normalized = String(url || '').trim();
   return normalized.startsWith('/static/') || isHttpUrl(normalized);
+}
+
+function compareVersionStrings(left: string, right: string) {
+  const leftParts = String(left || '')
+    .trim()
+    .split('.')
+    .map(part => Number(part));
+  const rightParts = String(right || '')
+    .trim()
+    .split('.')
+    .map(part => Number(part));
+  const maxLen = Math.max(leftParts.length, rightParts.length, 1);
+  for (let i = 0; i < maxLen; i += 1) {
+    const a = Number.isFinite(leftParts[i]) ? leftParts[i] : 0;
+    const b = Number.isFinite(rightParts[i]) ? rightParts[i] : 0;
+    if (a > b) return 1;
+    if (a < b) return -1;
+  }
+  return 0;
 }
 
 function MainApp() {
@@ -227,7 +257,7 @@ function MainApp() {
 
   const [itemName, setItemName] = useState('');
   const [itemSku, setItemSku] = useState('');
-  const [itemBrand, setItemBrand] = useState('General');
+  const [itemBrand, setItemBrand] = useState('');
   const [itemCategory, setItemCategory] = useState('Power Backup');
   const [itemCapacityAh, setItemCapacityAh] = useState('150Ah');
   const [itemQty, setItemQty] = useState('1');
@@ -258,6 +288,7 @@ function MainApp() {
   const [adjustDelta, setAdjustDelta] = useState('1');
   const [adjustReason, setAdjustReason] = useState('Manual adjustment');
   const theme = profileDarkMode ? darkTheme : lightTheme;
+  const appBrandLogo = profileDarkMode ? FOOTER_LOGO_IMAGE : FUELECTRIC_LOGO_IMAGE;
 
   const fade = useRef(new Animated.Value(0)).current;
   const rise = useRef(new Animated.Value(8)).current;
@@ -271,6 +302,8 @@ function MainApp() {
   const lastAddActionRef = useRef<{ id: string; ts: number } | null>(null);
   const addActionLockRef = useRef(false);
   const skipNextCartSyncRef = useRef(true);
+  const appUpdatePromptedRef = useRef(false);
+  const guestDarkModeCacheRef = useRef<{ loaded: boolean; value: boolean }>({ loaded: false, value: false });
   const [isStorefrontHydrated, setIsStorefrontHydrated] = useState(false);
   const currentOwnerKey = useMemo(
     () => (token && user?.id ? `user_${user.id}` : `guest_${guestIdRef.current}`),
@@ -306,6 +339,31 @@ function MainApp() {
       await AsyncStorage.removeItem(AUTH_USER_STORAGE_KEY);
     } catch {
       // best-effort cleanup
+    }
+  };
+
+  const readGuestDarkModePreference = async () => {
+    if (guestDarkModeCacheRef.current.loaded) {
+      return guestDarkModeCacheRef.current.value;
+    }
+    try {
+      const raw = await AsyncStorage.getItem(GUEST_DARK_MODE_STORAGE_KEY);
+      const nextValue = String(raw || '').trim() === '1';
+      guestDarkModeCacheRef.current = { loaded: true, value: nextValue };
+      return nextValue;
+    } catch {
+      guestDarkModeCacheRef.current = { loaded: true, value: false };
+      return false;
+    }
+  };
+
+  const writeGuestDarkModePreference = async (darkMode: boolean) => {
+    const nextValue = Boolean(darkMode);
+    guestDarkModeCacheRef.current = { loaded: true, value: nextValue };
+    try {
+      await AsyncStorage.setItem(GUEST_DARK_MODE_STORAGE_KEY, nextValue ? '1' : '0');
+    } catch {
+      // best-effort local persistence for guest settings
     }
   };
 
@@ -428,6 +486,90 @@ function MainApp() {
     Alert.alert(title, message || fallback);
   };
 
+  const checkForAppUpdate = async () => {
+    if (appUpdatePromptedRef.current || typeof fetch !== 'function') {
+      return;
+    }
+    try {
+      const platform = Platform.OS === 'ios' ? 'ios' : 'android';
+      const url = new URL(`${API_BASE}/api/public/app-update`);
+      url.searchParams.set('platform', platform);
+      url.searchParams.set('currentVersion', APP_CURRENT_VERSION);
+
+      const res = await fetch(url.toString());
+      const json = await parseResponseSafe(res);
+      if (!res.ok) {
+        return;
+      }
+
+      const currentVersion = String((json as any)?.currentVersion || APP_CURRENT_VERSION).trim() || APP_CURRENT_VERSION;
+      const latestVersion = String((json as any)?.latestVersion || '').trim();
+      const minimumSupportedVersion = String((json as any)?.minimumSupportedVersion || '').trim();
+      const updateAvailableFromApi = Boolean((json as any)?.updateAvailable);
+      const updateAvailable =
+        updateAvailableFromApi ||
+        (latestVersion ? compareVersionStrings(latestVersion, currentVersion) > 0 : false);
+      if (!updateAvailable || !latestVersion) {
+        return;
+      }
+
+      const forceUpdate =
+        Boolean((json as any)?.forceUpdate) ||
+        Boolean((json as any)?.mandatory) ||
+        (minimumSupportedVersion ? compareVersionStrings(minimumSupportedVersion, currentVersion) > 0 : false);
+      const downloadUrl = String((json as any)?.downloadUrl || '').trim();
+      if (!downloadUrl) {
+        return;
+      }
+
+      if (!forceUpdate) {
+        const skippedVersion = String((await AsyncStorage.getItem(APP_UPDATE_SKIP_VERSION_STORAGE_KEY)) || '').trim();
+        if (skippedVersion && skippedVersion === latestVersion) {
+          return;
+        }
+      }
+
+      appUpdatePromptedRef.current = true;
+      const releaseNotes = String((json as any)?.releaseNotes || '').trim();
+      const messageParts = [`Current: ${currentVersion}`, `Latest: ${latestVersion}`];
+      if (releaseNotes) {
+        messageParts.push('', releaseNotes);
+      }
+      const openUpdateUrl = async () => {
+        try {
+          await Linking.openURL(downloadUrl);
+        } catch {
+          showToast('Unable to open update link', 'error');
+          appUpdatePromptedRef.current = false;
+        }
+      };
+
+      if (forceUpdate) {
+        Alert.alert(
+          'Update Required',
+          messageParts.join('\n'),
+          [{ text: 'Update Now', onPress: () => void openUpdateUrl() }],
+          { cancelable: false },
+        );
+        return;
+      }
+
+      Alert.alert('Update Available', messageParts.join('\n'), [
+        {
+          text: 'Later',
+          style: 'cancel',
+          onPress: () => {
+            void AsyncStorage.setItem(APP_UPDATE_SKIP_VERSION_STORAGE_KEY, latestVersion);
+            appUpdatePromptedRef.current = false;
+          },
+        },
+        { text: 'Update Now', onPress: () => void openUpdateUrl() },
+      ]);
+    } catch {
+      // Do not block app load if update check fails.
+    }
+  };
+
   const openAuthModal = (mode: 'login' | 'register') => {
     setAuthMode(mode);
     authFormOpacity.setValue(1);
@@ -471,6 +613,12 @@ function MainApp() {
   };
 
   const openProfileEditModal = () => {
+    if (!token || !user) {
+      Alert.alert('Login Required', 'Please login to edit profile details.');
+      closeProfileModal();
+      openAuthModal('login');
+      return;
+    }
     setProfileDraftName(profileName);
     setProfileDraftEmail(profileEmail);
     setProfileDraftPhone(profilePhone);
@@ -478,42 +626,43 @@ function MainApp() {
   };
 
   const saveProfileEdits = async () => {
+    if (!token || !user) {
+      setIsProfileEditModalVisible(false);
+      Alert.alert('Login Required', 'Please login to edit profile details.');
+      openAuthModal('login');
+      return;
+    }
+
     if (!profileDraftName.trim() || !profileDraftEmail.trim() || !profileDraftPhone.trim()) {
       Alert.alert('Validation', 'Please fill all profile fields.');
       return;
     }
 
     try {
-      if (token && user) {
-        const json = await storefrontApiRequest<{ profile?: { name: string; email: string; phone: string } }>(
-          '/api/public/storefront/profile',
-          {
-            method: 'PATCH',
-            body: JSON.stringify({
-              name: profileDraftName.trim(),
-              email: profileDraftEmail.trim(),
-              phone: profileDraftPhone.trim(),
-            }),
-          },
+      const json = await storefrontApiRequest<{ profile?: { name: string; email: string; phone: string } }>(
+        '/api/public/storefront/profile',
+        {
+          method: 'PATCH',
+          body: JSON.stringify({
+            name: profileDraftName.trim(),
+            email: profileDraftEmail.trim(),
+            phone: profileDraftPhone.trim(),
+          }),
+        },
+      );
+      if (json.profile) {
+        setProfileName(json.profile.name || profileDraftName.trim());
+        setProfileEmail(json.profile.email || profileDraftEmail.trim());
+        setProfilePhone(json.profile.phone || profileDraftPhone.trim());
+        setUser(prev =>
+          prev
+            ? {
+                ...prev,
+                name: json.profile?.name || prev.name,
+                username: json.profile?.email || prev.username,
+              }
+            : prev,
         );
-        if (json.profile) {
-          setProfileName(json.profile.name || profileDraftName.trim());
-          setProfileEmail(json.profile.email || profileDraftEmail.trim());
-          setProfilePhone(json.profile.phone || profileDraftPhone.trim());
-          setUser(prev =>
-            prev
-              ? {
-                  ...prev,
-                  name: json.profile?.name || prev.name,
-                  username: json.profile?.email || prev.username,
-                }
-              : prev,
-          );
-        } else {
-          setProfileName(profileDraftName.trim());
-          setProfileEmail(profileDraftEmail.trim());
-          setProfilePhone(profileDraftPhone.trim());
-        }
       } else {
         setProfileName(profileDraftName.trim());
         setProfileEmail(profileDraftEmail.trim());
@@ -637,6 +786,9 @@ function MainApp() {
     setProfileLanguage(nextLanguage);
 
     if (!token || !user) {
+      if (Object.prototype.hasOwnProperty.call(patch, 'darkMode')) {
+        void writeGuestDarkModePreference(nextDarkMode);
+      }
       return;
     }
 
@@ -929,10 +1081,12 @@ function MainApp() {
       setCheckoutEmail('');
       skipNextCartSyncRef.current = true;
       setCartItems(Array.isArray(checkoutRes.cartItems) ? checkoutRes.cartItems : []);
-      if (Array.isArray(checkoutRes.orders)) {
+      if (Array.isArray(checkoutRes.orders) && checkoutRes.orders.length > 0) {
         setProfileOrders(checkoutRes.orders);
       } else if (checkoutRes.order) {
         setProfileOrders(prev => [checkoutRes.order as ProfileOrder, ...prev]);
+      } else {
+        await loadStorefrontState();
       }
       setIsOrderPlaced(true);
       showToast('Order placed successfully');
@@ -1051,7 +1205,7 @@ function MainApp() {
           id: item.id,
           name: item.name,
           model: item.sku,
-          brand: 'General',
+          brand: '',
           category: item.category,
           tags: [],
           shortDescription: `${item.category} product`,
@@ -1114,6 +1268,7 @@ function MainApp() {
           setProfileLanguage(json.preferences.language === 'Hindi' ? 'Hindi' : 'English');
         }
       } else {
+        const guestDarkMode = await readGuestDarkModePreference();
         setWishlistIds([]);
         setPaymentMethods(DEFAULT_PAYMENT_METHODS);
         setInstallationRequests([]);
@@ -1121,6 +1276,7 @@ function MainApp() {
         setProfileName('Piyush Sharma');
         setProfileEmail('piyush@email.com');
         setProfilePhone('+91 98XXXXXXXX');
+        setProfileDarkMode(guestDarkMode);
         setNotificationPrefs({
           orderUpdates: true,
           promotions: true,
@@ -1681,6 +1837,10 @@ function MainApp() {
   }, []);
 
   useEffect(() => {
+    void checkForAppUpdate();
+  }, []);
+
+  useEffect(() => {
     skipNextCartSyncRef.current = true;
     setIsStorefrontHydrated(false);
     loadStorefrontState();
@@ -1984,7 +2144,7 @@ function MainApp() {
   const resetItemDraft = () => {
     setItemName('');
     setItemSku('');
-    setItemBrand('General');
+    setItemBrand('');
     setItemCategory('Power Backup');
     setItemCapacityAh('150Ah');
     setItemQty('1');
@@ -2005,7 +2165,7 @@ function MainApp() {
     setEditingItemId(target.id);
     setItemName(target.name || '');
     setItemSku(target.sku || '');
-    setItemBrand(target.brand || 'General');
+    setItemBrand(target.brand || '');
     setItemCategory(target.category || 'Power Backup');
     setItemCapacityAh(target.capacityAh || '150Ah');
     setItemQty(String(target.qty || 0));
@@ -2066,7 +2226,7 @@ function MainApp() {
         body: JSON.stringify({
           name: itemName.trim(),
           sku: itemSku.trim(),
-          brand: itemBrand.trim() || 'General',
+          brand: itemBrand.trim(),
           category: itemCategory.trim(),
           capacityAh: itemCapacityAh,
           qty: Number(itemQty || 0),
@@ -2448,7 +2608,7 @@ function MainApp() {
           key={`public_scroll_${publicView}`}
           ref={publicScrollRef}
           removeClippedSubviews={false}
-          keyboardShouldPersistTaps="handled"
+          keyboardShouldPersistTaps="always"
           stickyHeaderIndices={landingSearchStickyHeaderIndices}
           contentContainerStyle={{
             paddingTop: Math.max(10, insets.top),
@@ -2470,7 +2630,7 @@ function MainApp() {
           <View style={[styles.top, { backgroundColor: theme.panel }]}>
             <View style={styles.brandRow}>
               <View style={styles.brandLogo}>
-                <Image source={FUELECTRIC_LOGO_IMAGE} style={styles.brandLogoImage} resizeMode="contain" />
+                <Image source={appBrandLogo} style={styles.brandLogoImage} resizeMode="contain" />
               </View>
             </View>
             <View style={styles.topActions}>
@@ -2647,24 +2807,63 @@ function MainApp() {
                 <Text style={[styles.profileHeaderIcon, { color: profileDarkMode ? '#E5E7EB' : '#111827' }]}>←</Text>
               </Pressable>
               <Text style={[styles.profileHeaderTitle, { color: profileDarkMode ? '#F8FAFC' : '#111827' }]}>My Profile</Text>
-              <Pressable style={styles.profileHeaderIconBtn} onPress={openProfileEditModal}>
-                <Text style={[styles.profileHeaderIcon, { color: profileDarkMode ? '#E5E7EB' : '#111827' }]}>✎</Text>
-              </Pressable>
+              {token && user ? (
+                <Pressable style={styles.profileHeaderIconBtn} onPress={openProfileEditModal}>
+                  <Text style={[styles.profileHeaderIcon, { color: profileDarkMode ? '#E5E7EB' : '#111827' }]}>✎</Text>
+                </Pressable>
+              ) : (
+                <View style={styles.profileHeaderIconBtn} />
+              )}
             </View>
 
             <ScrollView removeClippedSubviews contentContainerStyle={styles.profileContent}>
               <View style={[styles.profileUserCard, { backgroundColor: profileDarkMode ? '#111827' : '#FFFFFF' }]}>
                 <Image source={{ uri: 'https://i.pravatar.cc/240?img=12' }} style={styles.profileAvatar} resizeMode="cover" />
-                <View style={styles.profileUserInfo}>
-                  <Text style={[styles.profileUserName, { color: profileDarkMode ? '#F8FAFC' : '#111827' }]}>{profileName}</Text>
-                  <Text style={[styles.profileUserMeta, { color: profileDarkMode ? '#CBD5E1' : '#374151' }]}>{profileEmail}</Text>
-                  <Text style={[styles.profileUserMeta, { color: profileDarkMode ? '#CBD5E1' : '#374151' }]}>{profilePhone}</Text>
-                </View>
                 {token && user ? (
-                  <Pressable style={styles.profileLogoutMiniBtn} onPress={logout}>
-                    <Text style={styles.profileLogoutMiniText}>Logout</Text>
-                  </Pressable>
-                ) : null}
+                  <>
+                    <View style={styles.profileUserInfo}>
+                      <Text style={[styles.profileUserName, { color: profileDarkMode ? '#F8FAFC' : '#111827' }]}>{profileName}</Text>
+                      <Text style={[styles.profileUserMeta, { color: profileDarkMode ? '#CBD5E1' : '#374151' }]}>{profileEmail}</Text>
+                      <Text style={[styles.profileUserMeta, { color: profileDarkMode ? '#CBD5E1' : '#374151' }]}>{profilePhone}</Text>
+                    </View>
+                    <Pressable style={styles.profileLogoutMiniBtn} onPress={logout}>
+                      <Text style={styles.profileLogoutMiniText}>Logout</Text>
+                    </Pressable>
+                  </>
+                ) : (
+                  <View style={styles.profileUserInfo}>
+                    <Text style={[styles.profileUserName, { color: profileDarkMode ? '#F8FAFC' : '#111827' }]}>Guest User</Text>
+                    <Text style={[styles.profileUserMeta, { color: profileDarkMode ? '#CBD5E1' : '#374151' }]}>
+                      Login to view profile details and manage your account.
+                    </Text>
+                    <Pressable
+                      style={[
+                        styles.headerLoginBtn,
+                        {
+                          alignSelf: 'flex-start',
+                          marginTop: 8,
+                          borderColor: profileDarkMode ? '#4ADE80' : '#1E7B39',
+                          backgroundColor: profileDarkMode ? '#0F172A' : '#FFFFFF',
+                        },
+                      ]}
+                      onPress={() => {
+                        closeProfileModal();
+                        openAuthModal('login');
+                      }}
+                    >
+                      <Text
+                        style={[
+                          styles.headerLoginBtnText,
+                          {
+                            color: profileDarkMode ? '#4ADE80' : '#1E7B39',
+                          },
+                        ]}
+                      >
+                        Login to View
+                      </Text>
+                    </Pressable>
+                  </View>
+                )}
               </View>
 
               <Text style={[styles.profileSectionTitle, { color: profileDarkMode ? '#E5E7EB' : '#111827' }]}>Account Information</Text>
@@ -2775,18 +2974,43 @@ function MainApp() {
                   {profileOrders.length === 0 ? (
                     <Text style={styles.profilePanelEmpty}>No orders yet.</Text>
                   ) : (
-                    profileOrders.map(order => (
-                      <View key={order.id} style={styles.profilePanelRow}>
-                        <View style={{ flex: 1 }}>
-                          <Text style={styles.profilePanelMain}>{order.id}</Text>
-                          <Text style={styles.profilePanelSub}>{order.createdAt} • {order.itemCount} items</Text>
-                        </View>
-                        <View>
-                          <Text style={styles.profilePanelAmount}>₹{order.total.toLocaleString()}</Text>
-                          <Text style={styles.profilePanelStatus}>{order.status}</Text>
-                        </View>
-                      </View>
-                    ))
+                    profileOrders.map(order => {
+                      const orderItemSummary = [order.category, order.model]
+                        .map(value => String(value || '').trim())
+                        .filter(Boolean)
+                        .join(' ');
+
+                      return (
+                        <Pressable
+                          key={order.id}
+                          style={styles.profilePanelRow}
+                          onPress={() => {
+                            if (!order.productId) {
+                              showToast('Product details unavailable for this order', 'error');
+                              return;
+                            }
+                            setActiveProfilePanel(null);
+                            closeProfileModal();
+                            openProductDetail(order.productId);
+                          }}
+                        >
+                          <Image
+                            source={
+                              typeof order.thumbnail === 'string' && order.thumbnail.trim().length > 0
+                                ? { uri: order.thumbnail }
+                                : appBrandLogo
+                            }
+                            style={styles.profileWishlistImage}
+                          />
+                          <View style={{ flex: 1 }}>
+                            <Text style={styles.profilePanelMain}>Placed on {order.createdAt}</Text>
+                            <Text style={styles.profilePanelSub} numberOfLines={2}>
+                              {orderItemSummary || 'Product details unavailable'}
+                            </Text>
+                          </View>
+                        </Pressable>
+                      );
+                    })
                   )}
                 </View>
               ) : null}
@@ -3000,7 +3224,7 @@ function MainApp() {
 
               <View style={styles.authBrandRow}>
                 <View style={styles.authBrandLogo}>
-                  <Image source={FUELECTRIC_LOGO_IMAGE} style={styles.authBrandLogoImage} resizeMode="contain" />
+                  <Image source={appBrandLogo} style={styles.authBrandLogoImage} resizeMode="contain" />
                 </View>
               </View>
 
@@ -3062,19 +3286,26 @@ function MainApp() {
                         style={styles.authInputField}
                       />
                     </View>
-                    <Text style={styles.authHint}>* Minimum 6 characters</Text>
+                    <Text style={[styles.authHint, { color: theme.subtext }]}>* Minimum 6 characters</Text>
                     <Pressable style={styles.authPrimaryBtn} onPress={register} disabled={isLoading}>
                       <Text style={styles.authPrimaryText}>{isLoading ? 'Registering...' : 'Register'}</Text>
                     </Pressable>
-                    <Pressable style={styles.authSwitchRow} onPress={() => switchAuthMode('login')}>
-                      <Text style={styles.authSwitchText}>
-                        Have an account? <Text style={styles.authSwitchLink}>Login</Text>
+                    <View style={styles.authSwitchRow}>
+                      <Text style={[styles.authSwitchText, { color: theme.subtext }]}>
+                        Have an account?{' '}
+                        <Text
+                          style={[styles.authSwitchLink, { color: theme.accent }]}
+                          accessibilityRole="button"
+                          onPress={() => switchAuthMode('login')}
+                        >
+                          Login
+                        </Text>
                       </Text>
-                    </Pressable>
+                    </View>
                     <View style={styles.authDividerRow}>
-                      <View style={styles.authDividerLine} />
-                      <Text style={styles.authDividerText}>or register with</Text>
-                      <View style={styles.authDividerLine} />
+                      <View style={[styles.authDividerLine, { backgroundColor: theme.steel }]} />
+                      <Text style={[styles.authDividerText, { color: theme.subtext }]}>or register with</Text>
+                      <View style={[styles.authDividerLine, { backgroundColor: theme.steel }]} />
                     </View>
                     <Pressable style={styles.authSocialBtn} onPress={() => handleSocialAuthPress('Google')}>
                       <Text style={styles.authSocialEmoji}>G</Text>
@@ -3109,21 +3340,32 @@ function MainApp() {
                         style={styles.authInputField}
                       />
                     </View>
-                    <Pressable onPress={() => Alert.alert('Forgot Password', 'Password recovery flow will be added soon.')}>
-                      <Text style={styles.authForgot}>Forgot Password?</Text>
-                    </Pressable>
+                    <Text
+                      style={[styles.authForgot, { color: theme.accent, alignSelf: 'flex-end' }]}
+                      accessibilityRole="button"
+                      onPress={() => Alert.alert('Forgot Password', 'Password recovery flow will be added soon.')}
+                    >
+                      Forgot Password?
+                    </Text>
                     <Pressable style={styles.authPrimaryBtn} onPress={login} disabled={isLoading}>
                       <Text style={styles.authPrimaryText}>{isLoading ? 'Signing in...' : 'Login'}</Text>
                     </Pressable>
-                    <Pressable style={styles.authSwitchRow} onPress={() => switchAuthMode('register')}>
-                      <Text style={styles.authSwitchText}>
-                        Don’t have an account? <Text style={styles.authSwitchLink}>Register</Text>
+                    <View style={styles.authSwitchRow}>
+                      <Text style={[styles.authSwitchText, { color: theme.subtext }]}>
+                        Don’t have an account?{' '}
+                        <Text
+                          style={[styles.authSwitchLink, { color: theme.accent }]}
+                          accessibilityRole="button"
+                          onPress={() => switchAuthMode('register')}
+                        >
+                          Register
+                        </Text>
                       </Text>
-                    </Pressable>
+                    </View>
                     <View style={styles.authDividerRow}>
-                      <View style={styles.authDividerLine} />
-                      <Text style={styles.authDividerText}>or login with</Text>
-                      <View style={styles.authDividerLine} />
+                      <View style={[styles.authDividerLine, { backgroundColor: theme.steel }]} />
+                      <Text style={[styles.authDividerText, { color: theme.subtext }]}>or login with</Text>
+                      <View style={[styles.authDividerLine, { backgroundColor: theme.steel }]} />
                     </View>
                     <Pressable style={styles.authSocialBtn} onPress={() => handleSocialAuthPress('Google')}>
                       <Text style={styles.authSocialEmoji}>G</Text>
@@ -3137,9 +3379,6 @@ function MainApp() {
                 )}
               </Animated.View>
 
-              <View style={styles.authBottomVisual}>
-                <Image source={LANDING_HERO_IMAGE} style={styles.authBottomImage} resizeMode="cover" />
-              </View>
             </ScrollView>
           </SafeAreaView>
         </Modal>
@@ -3611,7 +3850,11 @@ function MainApp() {
                         }}
                         style={[styles.productListRow, { backgroundColor: theme.panelSoft }]}
                       >
-                        <Image source={{ uri: product.thumbnail }} style={styles.productListImage} resizeMode="cover" />
+                        <Image
+                          source={{ uri: product.thumbnail }}
+                          style={[styles.productListImage, profileDarkMode && styles.productListImageDark]}
+                          resizeMode="cover"
+                        />
                         <View style={{ flex: 1 }}>
                           {isFeaturedView ? (
                             <>
@@ -3628,7 +3871,7 @@ function MainApp() {
                                 ]}
                                 numberOfLines={1}
                               >
-                                Brand: {product.brand || 'General'}
+                                Brand: {product.brand || '—'}
                               </Text>
                               <Text
                                 style={[
@@ -3655,7 +3898,7 @@ function MainApp() {
                                 Model: {getLandingProductModel(product)}
                               </Text>
                               <Text style={[styles.small, { color: theme.subtext }]} numberOfLines={1}>
-                                Brand: {product.brand || 'General'}
+                                Brand: {product.brand || '—'}
                               </Text>
                             </>
                           )}

@@ -780,15 +780,30 @@ const styles = StyleSheet.create({
     borderColor: '#E5E7EB',
     borderWidth: 1,
   },
+  categoryCardNewDark: {
+    backgroundColor: '#111827',
+    borderColor: '#334155',
+  },
+  categoryCardNewDarkActive: {
+    borderColor: '#3FA36A',
+    borderWidth: 1.5,
+  },
   categoryThumb: {
     width: '100%',
     height: scaleVertical(54, 0.9, 1.15),
     borderRadius: 9,
     backgroundColor: '#E6ECE2',
   },
+  categoryThumbDark: {
+    backgroundColor: '#1F2937',
+    opacity: 0.78,
+  },
   categoryIconSmall: {
     marginTop: -10,
     fontSize: scaleFont(17),
+  },
+  categoryIconSmallDark: {
+    opacity: 0.88,
   },
   browseCategoriesWrap: {
     borderRadius: 20,
@@ -1011,6 +1026,71 @@ const styles = StyleSheet.create({
     fontSize: scaleFont(12),
     fontWeight: '700',
   },
+  categoryProductsSearchWrap: {
+    borderRadius: 12,
+    borderWidth: 1,
+    minHeight: scaleVertical(42, 0.9, 1.08),
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 10,
+    gap: 6,
+  },
+  categoryProductsSearchIcon: {
+    fontSize: scaleFont(14),
+    fontWeight: '700',
+  },
+  categoryProductsSearchInput: {
+    flex: 1,
+    fontSize: scaleFont(14),
+    fontWeight: '600',
+    paddingVertical: 9,
+  },
+  categoryProductsSearchClear: {
+    fontSize: scaleFont(14),
+    fontWeight: '800',
+    paddingHorizontal: 4,
+  },
+  categoryProductsSearchStatusRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 8,
+    paddingHorizontal: 2,
+  },
+  categoryProductsSearchStatusText: {
+    flex: 1,
+    fontSize: scaleFont(12),
+    fontWeight: '600',
+  },
+  categoryProductsSearchStatusClear: {
+    fontSize: scaleFont(12),
+    fontWeight: '800',
+  },
+  categoryProductsSearchModalBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(2, 6, 23, 0.42)',
+    justifyContent: 'center',
+    paddingHorizontal: 16,
+  },
+  categoryProductsSearchModalCard: {
+    borderRadius: 14,
+    borderWidth: 1,
+    padding: 12,
+    gap: 10,
+  },
+  categoryProductsSearchModalHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  categoryProductsSearchModalTitle: {
+    fontSize: scaleFont(15),
+    fontWeight: '800',
+  },
+  categoryProductsSearchModalDone: {
+    fontSize: scaleFont(13),
+    fontWeight: '800',
+  },
   categoryProductsGrid: {
     flexDirection: 'row',
     flexWrap: 'wrap',
@@ -1031,6 +1111,13 @@ const styles = StyleSheet.create({
   categoryProductsCardImage: {
     width: '100%',
     height: scaleVertical(110, 0.9, 1.05),
+  },
+  categoryProductsCardImageDark: {
+    backgroundColor: '#1F2937',
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#334155',
+    opacity: 0.84,
   },
   categoryProductsCardName: {
     textAlign: 'center',
@@ -1339,6 +1426,12 @@ const styles = StyleSheet.create({
     borderRadius: 8,
     backgroundColor: '#E6ECE2',
   },
+  productImageDark: {
+    backgroundColor: '#1F2937',
+    borderWidth: 1,
+    borderColor: '#334155',
+    opacity: 0.84,
+  },
   productTileTop: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -1411,6 +1504,12 @@ const styles = StyleSheet.create({
     height: scaleSize(74, 0.86, 1.1),
     borderRadius: 8,
     backgroundColor: '#E6ECE2',
+  },
+  productListImageDark: {
+    backgroundColor: '#1F2937',
+    borderWidth: 1,
+    borderColor: '#334155',
+    opacity: 0.84,
   },
   productCartHint: {
     color: '#166534',

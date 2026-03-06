@@ -35,10 +35,12 @@ export const API_BASE = Platform.select({
   ios: 'http://localhost:4000',
   default: 'http://localhost:4000',
 });
+export const APP_CURRENT_VERSION = '1.0.0';
 
 export const LANDING_HERO_IMAGE = require('../assets/images/land-page-bg.png');
 export const APP_LOGO_IMAGE = require('../assets/images/icon.png');
 export const FUELECTRIC_LOGO_IMAGE = require('../assets/images/fuelectric-3.png');
+export const FOOTER_LOGO_IMAGE = require('../assets/images/footer-logo.png');
 
 export const modules: Array<{ id: ModuleId; label: string }> = [
   { id: 'home', label: '🏠' },

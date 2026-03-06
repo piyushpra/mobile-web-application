@@ -4,19 +4,22 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const mysql = require('mysql2/promise');
+const { config } = require('./config');
 
-const PORT = Number(process.env.PORT || 4000);
-const SESSION_TTL_MS = Number(process.env.SESSION_TTL_MS || 1000 * 60 * 60 * 24 * 365 * 10);
-const MYSQL_HOST = process.env.MYSQL_HOST || '127.0.0.1';
-const MYSQL_PORT = Number(process.env.MYSQL_PORT || 3306);
-const MYSQL_USER = process.env.MYSQL_USER || 'root';
-const MYSQL_PASSWORD = process.env.MYSQL_PASSWORD || 'apple';
-const MYSQL_DATABASE = process.env.MYSQL_DATABASE || 'mobile_app_db';
+const PORT = config.port;
+const SESSION_TTL_MS = config.sessionTtlMs;
+const MYSQL_HOST = config.mysql.host;
+const MYSQL_PORT = config.mysql.port;
+const MYSQL_USER = config.mysql.user;
+const MYSQL_PASSWORD = config.mysql.password;
+const MYSQL_DATABASE = config.mysql.database;
 const STATIC_URL_PREFIX = '/static/';
 const STATIC_ROOT = path.join(__dirname, 'data', 'generated');
 const ITEM_UPLOAD_DIR = path.join(STATIC_ROOT, 'product-images', 'items');
-const MAX_ITEM_UPLOAD_COUNT = Number(process.env.MAX_ITEM_UPLOAD_COUNT || 5);
-const MAX_ITEM_UPLOAD_BYTES = Number(process.env.MAX_ITEM_UPLOAD_BYTES || 5 * 1024 * 1024);
+const MAX_ITEM_UPLOAD_COUNT = config.uploads.maxItemUploadCount;
+const MAX_ITEM_UPLOAD_BYTES = config.uploads.maxItemUploadBytes;
+const APP_UPDATE_MANIFEST_PATH = path.join(__dirname, 'data', 'app_update_manifest.json');
+const APP_UPDATE_MANIFEST_CACHE_MS = config.appUpdateManifestCacheMs;
 
 const mysqlPool = mysql.createPool({
   host: MYSQL_HOST,
@@ -25,7 +28,7 @@ const mysqlPool = mysql.createPool({
   password: MYSQL_PASSWORD,
   database: MYSQL_DATABASE,
   waitForConnections: true,
-  connectionLimit: Number(process.env.MYSQL_POOL_SIZE || 10),
+  connectionLimit: config.mysql.poolSize,
   queueLimit: 0,
 });
 
@@ -64,6 +67,8 @@ const DEFAULT_LOCATION_SUGGESTIONS = [
 ];
 
 const sessions = new Map();
+let appUpdateManifestCache = null;
+let appUpdateManifestLoadedAt = 0;
 
 let writeQueue = Promise.resolve();
 
@@ -89,6 +94,81 @@ function parseNumber(value, fallback = 0) {
 
 function clamp2(num) {
   return Math.round(num * 100) / 100;
+}
+
+function compareAppVersions(left, right) {
+  const leftParts = String(left || '')
+    .trim()
+    .split('.')
+    .map(part => parseNumber(part, 0));
+  const rightParts = String(right || '')
+    .trim()
+    .split('.')
+    .map(part => parseNumber(part, 0));
+  const maxLen = Math.max(leftParts.length, rightParts.length, 1);
+  for (let i = 0; i < maxLen; i += 1) {
+    const a = leftParts[i] ?? 0;
+    const b = rightParts[i] ?? 0;
+    if (a > b) return 1;
+    if (a < b) return -1;
+  }
+  return 0;
+}
+
+function getDefaultAppUpdateManifest() {
+  return {
+    android: {
+      latestVersion: '1.0.0',
+      minimumSupportedVersion: '1.0.0',
+      mandatory: false,
+      downloadUrl: '',
+      releaseNotes: '',
+    },
+    ios: {
+      latestVersion: '1.0.0',
+      minimumSupportedVersion: '1.0.0',
+      mandatory: false,
+      downloadUrl: '',
+      releaseNotes: '',
+    },
+  };
+}
+
+function normalizeAppUpdateEntry(entry, fallbackVersion = '1.0.0') {
+  const fallback = String(fallbackVersion || '1.0.0').trim() || '1.0.0';
+  const latestVersion = String(entry?.latestVersion || fallback).trim() || fallback;
+  const minimumSupportedVersion = String(entry?.minimumSupportedVersion || latestVersion).trim() || latestVersion;
+  return {
+    latestVersion,
+    minimumSupportedVersion,
+    mandatory: Boolean(entry?.mandatory),
+    downloadUrl: String(entry?.downloadUrl || '').trim(),
+    releaseNotes: String(entry?.releaseNotes || '').trim(),
+  };
+}
+
+async function readAppUpdateManifest() {
+  const now = Date.now();
+  if (appUpdateManifestCache && now - appUpdateManifestLoadedAt < APP_UPDATE_MANIFEST_CACHE_MS) {
+    return appUpdateManifestCache;
+  }
+
+  const fallbackManifest = getDefaultAppUpdateManifest();
+  try {
+    const raw = await fs.promises.readFile(APP_UPDATE_MANIFEST_PATH, 'utf8');
+    const parsed = JSON.parse(raw);
+    const manifest = {
+      android: normalizeAppUpdateEntry(parsed?.android, fallbackManifest.android.latestVersion),
+      ios: normalizeAppUpdateEntry(parsed?.ios, fallbackManifest.ios.latestVersion),
+    };
+    appUpdateManifestCache = manifest;
+    appUpdateManifestLoadedAt = now;
+    return manifest;
+  } catch {
+    appUpdateManifestCache = fallbackManifest;
+    appUpdateManifestLoadedAt = now;
+    return fallbackManifest;
+  }
 }
 
 function computeStatus(qty, reorderPoint = 8) {
@@ -138,6 +218,28 @@ function toProductTagsDbValue(tags) {
   return normalized.length > 0 ? normalized.join(',') : null;
 }
 
+function normalizeBrand(value) {
+  const brand = String(value || '').trim();
+  if (!brand) {
+    return '';
+  }
+  if (brand.toLowerCase() === 'general') {
+    return '';
+  }
+  return brand;
+}
+
+function normalizeCategory(value) {
+  const category = String(value || '').trim();
+  if (!category) {
+    return 'Misc';
+  }
+  if (category.toLowerCase() === 'general') {
+    return 'Misc';
+  }
+  return category;
+}
+
 function normalizeItem(item) {
   const qty = parseNumber(item.qty, 0);
   const reorderPoint = parseNumber(item.reorderPoint, 8);
@@ -153,9 +255,9 @@ function normalizeItem(item) {
     model: item.model || item.sku || `MODEL-${id.slice(-4).toUpperCase()}`,
     capacityAh: normalizeCapacityAh(item.capacityAh || item.capacity_ah),
     sku: item.sku || `HSN-SAC-${id.toUpperCase()}`,
-    category: item.category || 'Misc',
+    category: normalizeCategory(item.category),
     unit: item.unit || 'pcs',
-    brand: item.brand || '',
+    brand: normalizeBrand(item.brand),
     tags: normalizeItemTags(item.tags),
     description: item.description || '',
     images:
@@ -623,6 +725,25 @@ async function ensureDb() {
       );
 
       await conn.query(
+        `CREATE TABLE IF NOT EXISTS user_dark_mode_settings (
+          user_id VARCHAR(64) NOT NULL,
+          dark_mode TINYINT(1) NOT NULL DEFAULT 0,
+          updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+          PRIMARY KEY (user_id),
+          CONSTRAINT fk_user_dark_mode_settings_user
+            FOREIGN KEY (user_id) REFERENCES users(id)
+            ON DELETE CASCADE
+            ON UPDATE CASCADE
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+      );
+
+      await conn.query(
+        `INSERT IGNORE INTO user_dark_mode_settings (user_id, dark_mode)
+         SELECT user_id, dark_mode
+         FROM user_preferences`,
+      );
+
+      await conn.query(
         `CREATE TABLE IF NOT EXISTS notification_preferences (
           user_id VARCHAR(64) NOT NULL,
           order_updates TINYINT(1) NOT NULL DEFAULT 1,
@@ -895,6 +1016,29 @@ async function ensureDb() {
         );
         rank -= 1;
       }
+
+      try {
+        await conn.query(
+          `DELETE FROM products
+           WHERE LOWER(TRIM(COALESCE(category, ''))) = 'general'`,
+        );
+      } catch (error) {
+        if (error && (error.code === 'ER_ROW_IS_REFERENCED_2' || error.code === 'ER_ROW_IS_REFERENCED')) {
+          await conn.query(
+            `UPDATE products
+             SET category = 'Misc'
+             WHERE LOWER(TRIM(COALESCE(category, ''))) = 'general'`,
+          );
+        } else {
+          throw error;
+        }
+      }
+
+      await conn.query(
+        `UPDATE products
+         SET brand = ''
+         WHERE LOWER(TRIM(COALESCE(brand, ''))) = 'general'`,
+      );
 
       mysqlBootstrapped = true;
     } finally {
@@ -1489,9 +1633,9 @@ function writeDb(db) {
             item.model || item.sku,
             normalizeCapacityAh(item.capacityAh),
             item.sku,
-            item.category || 'Misc',
+            normalizeCategory(item.category),
             item.unit || 'pcs',
-            item.brand || '',
+            normalizeBrand(item.brand),
             toProductTagsDbValue(item.tags),
             item.description || '',
             item.hsnCode || '',
@@ -2135,13 +2279,18 @@ function getFallbackThumbnail() {
   return 'https://dummyimage.com/240x160/e6ece2/1f2937.png&text=Product';
 }
 
-function toProfileOrder(row) {
+function toProfileOrder(row, req = null) {
   return {
-    id: row.order_number || row.id,
+    id: row.order_item_id || row.order_number || row.id,
     createdAt: toYmd(row.placed_at || row.created_at),
-    itemCount: parseNumber(row.item_count, 0),
+    itemCount: Math.max(1, parseNumber(row.qty, parseNumber(row.item_count, 1))),
     total: parseNumber(row.total, 0),
     status: row.status || 'Processing',
+    productId: row.product_id || null,
+    brand: row.brand || '',
+    category: row.category || '',
+    model: row.model || row.order_item_model || row.product_name || '',
+    thumbnail: resolveAssetUrl(req, row.thumbnail || getFallbackThumbnail()),
   };
 }
 
@@ -2150,6 +2299,11 @@ async function ensureUserPreferenceRows(conn, userId) {
   await conn.query(
     `INSERT IGNORE INTO user_preferences (user_id, dark_mode, language)
      VALUES (?, 0, 'English')`,
+    [userId],
+  );
+  await conn.query(
+    `INSERT IGNORE INTO user_dark_mode_settings (user_id, dark_mode)
+     VALUES (?, 0)`,
     [userId],
   );
   await conn.query(
@@ -2213,7 +2367,7 @@ async function fetchCartItemsByCartId(conn, cartId, req = null) {
   }));
 }
 
-async function fetchOrdersByOwner(conn, owner) {
+async function fetchOrdersByOwner(conn, owner, req = null) {
   const ownerWhere = buildOwnerCondition(owner);
   const [rows] = await conn.query(
     `SELECT co.id,
@@ -2222,15 +2376,32 @@ async function fetchOrdersByOwner(conn, owner) {
             co.placed_at,
             co.created_at,
             co.total,
-            COALESCE(SUM(coi.qty), 0) AS item_count
+            coi.id AS order_item_id,
+            coi.product_id,
+            coi.product_name,
+            coi.model AS order_item_model,
+            coi.qty,
+            CASE
+              WHEN LOWER(TRIM(COALESCE(p.brand, ''))) = 'general' THEN ''
+              ELSE COALESCE(NULLIF(p.brand, ''), '')
+            END AS brand,
+            CASE
+              WHEN LOWER(TRIM(COALESCE(p.category, ''))) = 'general' THEN ''
+              ELSE COALESCE(NULLIF(p.category, ''), '')
+            END AS category,
+            COALESCE(NULLIF(p.model, ''), NULLIF(coi.model, ''), '') AS model,
+            COALESCE(pi.image_url, '') AS thumbnail
      FROM customer_orders co
-     LEFT JOIN customer_order_items coi ON coi.order_id = co.id
+     INNER JOIN customer_order_items coi ON coi.order_id = co.id
+     LEFT JOIN products p ON p.id = coi.product_id
+     LEFT JOIN product_images pi
+       ON pi.product_id = coi.product_id
+      AND pi.is_primary = 1
      WHERE ${ownerWhere.sql}
-     GROUP BY co.id, co.order_number, co.status, co.placed_at, co.created_at, co.total
-     ORDER BY co.placed_at DESC, co.created_at DESC`,
+     ORDER BY co.placed_at DESC, co.created_at DESC, co.id DESC, coi.id DESC`,
     ownerWhere.params,
   );
-  return (Array.isArray(rows) ? rows : []).map(toProfileOrder);
+  return (Array.isArray(rows) ? rows : []).map(row => toProfileOrder(row, req));
 }
 
 async function fetchWishlistIds(conn, userId) {
@@ -2326,35 +2497,31 @@ async function fetchUserProfileAndPrefs(conn, userId) {
       preferences: { darkMode: false, language: 'English' },
     };
   }
-  const [[userRows], [prefRows]] = await Promise.all([
-    conn.query(
-      `SELECT full_name, username, phone
-       FROM users
-       WHERE id = ?
-       LIMIT 1`,
-      [userId],
-    ),
-    conn.query(
-      `SELECT dark_mode, language
-       FROM user_preferences
-       WHERE user_id = ?
-       LIMIT 1`,
-      [userId],
-    ),
-  ]);
-  const userRow = Array.isArray(userRows) ? userRows[0] : null;
-  const prefRow = Array.isArray(prefRows) ? prefRows[0] : null;
+  const [rows] = await conn.query(
+    `SELECT u.full_name,
+            u.username,
+            u.phone,
+            COALESCE(udm.dark_mode, up.dark_mode, 0) AS dark_mode,
+            COALESCE(up.language, 'English') AS language
+     FROM users u
+     LEFT JOIN user_dark_mode_settings udm ON udm.user_id = u.id
+     LEFT JOIN user_preferences up ON up.user_id = u.id
+     WHERE u.id = ?
+     LIMIT 1`,
+    [userId],
+  );
+  const row = Array.isArray(rows) ? rows[0] : null;
   return {
-    profile: userRow
+    profile: row
       ? {
-          name: userRow.full_name || '',
-          email: userRow.username || '',
-          phone: userRow.phone || '',
+          name: row.full_name || '',
+          email: row.username || '',
+          phone: row.phone || '',
         }
       : null,
     preferences: {
-      darkMode: Number(prefRow?.dark_mode || 0) === 1,
-      language: prefRow?.language === 'Hindi' ? 'Hindi' : 'English',
+      darkMode: Number(row?.dark_mode || 0) === 1,
+      language: row?.language === 'Hindi' ? 'Hindi' : 'English',
     },
   };
 }
@@ -2607,6 +2774,30 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
+    if (pathname === '/api/public/app-update' && req.method === 'GET') {
+      const platformRaw = String(searchParams.get('platform') || '').trim().toLowerCase();
+      const platform = platformRaw === 'ios' ? 'ios' : 'android';
+      const currentVersion = String(searchParams.get('currentVersion') || '').trim() || '0.0.0';
+      const manifest = await readAppUpdateManifest();
+      const entry = platform === 'ios' ? manifest.ios : manifest.android;
+      const updateAvailable = compareAppVersions(entry.latestVersion, currentVersion) > 0;
+      const minVersionRequiresUpdate = compareAppVersions(entry.minimumSupportedVersion, currentVersion) > 0;
+      const forceUpdate = minVersionRequiresUpdate || (entry.mandatory && updateAvailable);
+
+      sendJson(res, 200, {
+        platform,
+        currentVersion,
+        latestVersion: entry.latestVersion,
+        minimumSupportedVersion: entry.minimumSupportedVersion,
+        mandatory: forceUpdate,
+        updateAvailable,
+        forceUpdate,
+        downloadUrl: entry.downloadUrl,
+        releaseNotes: entry.releaseNotes,
+      });
+      return;
+    }
+
     if (pathname === '/api/public/products' && req.method === 'GET') {
       const db = await readDb();
       const search = (searchParams.get('search') || '').trim().toLowerCase();
@@ -2769,6 +2960,11 @@ const server = http.createServer(async (req, res) => {
         [user.id],
       );
       await mysqlPool.query(
+        `INSERT IGNORE INTO user_dark_mode_settings (user_id, dark_mode)
+         VALUES (?, 0)`,
+        [user.id],
+      );
+      await mysqlPool.query(
         `INSERT IGNORE INTO notification_preferences (user_id, order_updates, promotions, warranty_alerts)
          VALUES (?, 1, 1, 1)`,
         [user.id],
@@ -2920,7 +3116,7 @@ const server = http.createServer(async (req, res) => {
           profileBundle,
         ] = await Promise.all([
           fetchCartItemsByCartId(conn, cart.id, req),
-          fetchOrdersByOwner(conn, owner),
+          fetchOrdersByOwner(conn, owner, req),
           fetchWishlistIds(conn, owner.userId),
           fetchPaymentMethods(conn, owner.userId),
           fetchInstallationRequests(conn, owner.userId),
@@ -3131,7 +3327,7 @@ const server = http.createServer(async (req, res) => {
         );
 
         const [orders, cartItems] = await Promise.all([
-          fetchOrdersByOwner(conn, owner),
+          fetchOrdersByOwner(conn, owner, req),
           fetchCartItemsByCartId(conn, cart.id, req),
         ]);
 
@@ -3409,9 +3605,15 @@ const server = http.createServer(async (req, res) => {
         await ensureUserPreferenceRows(conn, authUser.userId);
         await conn.query(
           `UPDATE user_preferences
-           SET dark_mode = ?, language = ?
+           SET language = ?
            WHERE user_id = ?`,
-          [darkMode ? 1 : 0, language, authUser.userId],
+          [language, authUser.userId],
+        );
+        await conn.query(
+          `UPDATE user_dark_mode_settings
+           SET dark_mode = ?
+           WHERE user_id = ?`,
+          [darkMode ? 1 : 0, authUser.userId],
         );
         const profileBundle = await fetchUserProfileAndPrefs(conn, authUser.userId);
         sendJson(res, 200, { preferences: profileBundle.preferences, profile: profileBundle.profile });

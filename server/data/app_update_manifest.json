@@ -1,0 +1,16 @@
+{
+  "android": {
+    "latestVersion": "1.0.0",
+    "minimumSupportedVersion": "1.0.0",
+    "mandatory": false,
+    "downloadUrl": "https://example.com/mobile-app-latest.apk",
+    "releaseNotes": "Bug fixes and performance improvements."
+  },
+  "ios": {
+    "latestVersion": "1.0.0",
+    "minimumSupportedVersion": "1.0.0",
+    "mandatory": false,
+    "downloadUrl": "https://apps.apple.com/app/id0000000000",
+    "releaseNotes": "Bug fixes and performance improvements."
+  }
+}

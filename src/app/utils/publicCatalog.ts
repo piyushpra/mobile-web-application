@@ -77,13 +77,19 @@ function toTitleCase(value: string) {
   return cleaned.replace(/\b[a-z]/g, match => match.toUpperCase());
 }
 
+function sanitizeDisplayValue(value: string) {
+  const cleaned = normalizeSpaces(value);
+  if (!cleaned) return '';
+  return cleaned.toLowerCase() === 'general' ? '' : cleaned;
+}
+
 function inferCategoryLabel(product: {
   category?: string;
   name?: string;
   model?: string;
   shortDescription?: string;
 }) {
-  const rawCategory = normalizeSpaces(String(product.category || ''));
+  const rawCategory = sanitizeDisplayValue(String(product.category || ''));
   const categorySource = `${rawCategory} ${product.name || ''} ${product.model || ''} ${product.shortDescription || ''}`.toLowerCase();
   if (categorySource.includes('battery')) return 'Battery';
   if (categorySource.includes('inverter')) return 'Inverter';
@@ -110,7 +116,7 @@ function stripLeadingModelWords(model: string, brand: string, category: string) 
 export const getLandingProductTitle = (
   product: Pick<PublicProduct, 'name' | 'model' | 'brand' | 'category' | 'shortDescription'>,
 ) => {
-  const brand = toTitleCase(String(product.brand || '').trim()) || 'General';
+  const brand = toTitleCase(sanitizeDisplayValue(String(product.brand || '').trim()));
   const category = inferCategoryLabel(product);
   const rawModel = normalizeSpaces(String(product.model || '').trim() || String(product.name || '').trim());
   const model = stripLeadingModelWords(rawModel, brand, category) || rawModel;
@@ -120,7 +126,7 @@ export const getLandingProductTitle = (
 export const getLandingProductModel = (
   product: Pick<PublicProduct, 'name' | 'model' | 'brand' | 'category' | 'shortDescription'>,
 ) => {
-  const brand = toTitleCase(String(product.brand || '').trim()) || 'General';
+  const brand = toTitleCase(sanitizeDisplayValue(String(product.brand || '').trim()));
   const category = inferCategoryLabel(product);
   const rawModel = normalizeSpaces(String(product.model || '').trim() || String(product.name || '').trim());
   return stripLeadingModelWords(rawModel, brand, category) || rawModel;

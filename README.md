@@ -95,3 +95,37 @@ To learn more about React Native, take a look at the following resources:
 - [Learn the Basics](https://reactnative.dev/docs/getting-started) - a **guided tour** of the React Native **basics**.
 - [Blog](https://reactnative.dev/blog) - read the latest official React Native **Blog** posts.
 - [`@facebook/react-native`](https://github.com/facebook/react-native) - the Open Source; GitHub **repository** for React Native.
+
+## EC2 Deployment Helpers
+
+The default remote application path for this project is:
+
+```sh
+/opt/mobile/mobile-web-application
+```
+
+Two helper scripts are available under `scripts/`:
+
+```sh
+# Sync the current project to EC2
+EC2_HOST=<your-ec2-host> ./scripts/ec2-sync.sh
+
+# Run a command from the remote app directory
+EC2_HOST=<your-ec2-host> ./scripts/ec2-run.sh pwd
+EC2_HOST=<your-ec2-host> ./scripts/ec2-run.sh npm ci
+EC2_HOST=<your-ec2-host> ./scripts/ec2-run.sh pm2 restart <your-process-name>
+```
+
+Optional environment variables:
+
+```sh
+EC2_USER=ec2-user
+SSH_PORT=22
+EC2_APP_PATH=/opt/mobile/mobile-web-application
+```
+
+If your PM2 process name matches the folder name, the restart command would be:
+
+```sh
+EC2_HOST=<your-ec2-host> ./scripts/ec2-run.sh pm2 restart mobile-web-application
+```

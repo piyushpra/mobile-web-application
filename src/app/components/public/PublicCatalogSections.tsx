@@ -1,7 +1,7 @@
 import React from 'react';
 import { ActivityIndicator, FlatList, Image, Pressable, ScrollView, Text, View } from 'react-native';
 
-import { LANDING_HERO_IMAGE } from '../../constants';
+import { LANDING_HERO_IMAGE, darkTheme } from '../../constants';
 import styles from '../../styles';
 import type { CartItem, LandingCategory, PublicProduct, PublicView, Theme } from '../../types';
 import { getLandingProductModel, getLandingProductTitle, getOfferLabel } from '../../utils/publicCatalog';
@@ -57,6 +57,7 @@ function PublicCatalogSections({
   continueCheckout,
   error,
 }: Props) {
+  const isDarkMode = theme.bg === darkTheme.bg;
   const browseCategoryBlueprints = React.useMemo(
     () => [
       { id: 'exide_products', brandLabel: 'EXIDE', title: 'Exide Products', brandKeys: ['exide'], kindKeys: ['battery'], target: 'batteries' as LandingCategory },
@@ -131,7 +132,11 @@ function PublicCatalogSections({
       const productCartQty = cartQtyByProductId[item.id] || 0;
       return (
         <Pressable onPress={() => openProductDetail(item.id)} style={[styles.productListRow, { backgroundColor: theme.panelSoft }]}>
-          <Image source={{ uri: item.thumbnail }} style={styles.productListImage} resizeMode="cover" />
+          <Image
+            source={{ uri: item.thumbnail }}
+            style={[styles.productListImage, isDarkMode && styles.productListImageDark]}
+            resizeMode="cover"
+          />
           <View style={{ flex: 1 }}>
             <Text style={[styles.itemText, { color: theme.text }]} numberOfLines={1}>
               {getLandingProductTitle(item)}
@@ -139,16 +144,18 @@ function PublicCatalogSections({
             <Text style={[styles.small, { color: theme.subtext }]} numberOfLines={1}>
               Model: {getLandingProductModel(item)}
             </Text>
-            <Text style={[styles.small, { color: theme.subtext }]} numberOfLines={1}>
-              Brand: {item.brand || 'General'}
-            </Text>
+            {String(item.brand || '').trim() ? (
+              <Text style={[styles.small, { color: theme.subtext }]} numberOfLines={1}>
+                Brand: {item.brand}
+              </Text>
+            ) : null}
             {productCartQty > 0 ? <Text style={styles.productCartHint}>In cart: {productCartQty}</Text> : null}
           </View>
           <Text style={[styles.small, { color: theme.primary }]}>Open</Text>
         </Pressable>
       );
     },
-    [cartQtyByProductId, openProductDetail, theme],
+    [cartQtyByProductId, isDarkMode, openProductDetail, theme],
   );
 
   const renderCartRow = React.useCallback(
@@ -292,14 +299,21 @@ function PublicCatalogSections({
         <View style={styles.rowBetween}>
           <Text style={[styles.title, { color: theme.text }]}>Shop by Category</Text>
           <Pressable onPress={goToLanding}>
-            <Text style={[styles.small, { color: '#1F7A35', fontWeight: '900' }]}>View All</Text>
+            <Text style={[styles.small, { color: theme.accent, fontWeight: '900' }]}>View All</Text>
           </Pressable>
         </View>
         <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.categoryScroll}>
             {categoryCards.map(card => (
               <Pressable
                 key={card.key}
-                style={[styles.categoryCardNew, landingCategory === card.key && { borderColor: theme.accent, borderWidth: 2 }]}
+                style={[
+                  styles.categoryCardNew,
+                  isDarkMode && styles.categoryCardNewDark,
+                  landingCategory === card.key &&
+                    (isDarkMode
+                      ? styles.categoryCardNewDarkActive
+                      : { borderColor: theme.accent, borderWidth: 2 }),
+                ]}
                 onPress={() => {
                   setLandingCategory(card.key);
                   setPublicView('landing');
@@ -307,10 +321,10 @@ function PublicCatalogSections({
               >
                 <Image
                   source={card.thumb ? { uri: card.thumb } : LANDING_HERO_IMAGE}
-                  style={styles.categoryThumb}
+                  style={[styles.categoryThumb, isDarkMode && styles.categoryThumbDark]}
                   resizeMode="cover"
                 />
-                <Text style={styles.categoryIconSmall}>{card.icon}</Text>
+                <Text style={[styles.categoryIconSmall, isDarkMode && styles.categoryIconSmallDark]}>{card.icon}</Text>
                 <Text style={[styles.categoryLabel, { marginTop: 6, color: theme.text }]}>{card.label}</Text>
               </Pressable>
             ))}
@@ -343,7 +357,11 @@ function PublicCatalogSections({
                     onPress={() => openProductDetail(product.id)}
                     style={[styles.productListRow, { backgroundColor: theme.panelSoft }]}
                   >
-                    <Image source={{ uri: product.thumbnail }} style={styles.productListImage} resizeMode="cover" />
+                    <Image
+                      source={{ uri: product.thumbnail }}
+                      style={[styles.productListImage, isDarkMode && styles.productListImageDark]}
+                      resizeMode="cover"
+                    />
                     <View style={{ flex: 1 }}>
                       <Text style={[styles.itemText, { color: theme.text }]} numberOfLines={2}>
                         {getLandingProductTitle(product)}
@@ -351,9 +369,11 @@ function PublicCatalogSections({
                       <Text style={[styles.small, { color: theme.subtext }]} numberOfLines={1}>
                         Model: {getLandingProductModel(product)}
                       </Text>
-                      <Text style={[styles.small, { color: theme.subtext }]} numberOfLines={1}>
-                        Brand: {product.brand || 'General'}
-                      </Text>
+                      {String(product.brand || '').trim() ? (
+                        <Text style={[styles.small, { color: theme.subtext }]} numberOfLines={1}>
+                          Brand: {product.brand}
+                        </Text>
+                      ) : null}
                       {productCartQty > 0 ? <Text style={styles.productCartHint}>In cart: {productCartQty}</Text> : null}
                     </View>
                     <Text style={[styles.small, { color: theme.primary }]}>Open</Text>
@@ -382,7 +402,11 @@ function PublicCatalogSections({
                         <Text style={styles.dealBadgeText}>{offerLabel}</Text>
                       </View>
                     ) : null}
-                    <Image source={{ uri: product.thumbnail }} style={styles.productImage} resizeMode="cover" />
+                    <Image
+                      source={{ uri: product.thumbnail }}
+                      style={[styles.productImage, isDarkMode && styles.productImageDark]}
+                      resizeMode="cover"
+                    />
                     <Text style={[styles.itemText, styles.productTileName, { color: theme.text }]} numberOfLines={2}>
                       {getLandingProductTitle(product)}
                     </Text>

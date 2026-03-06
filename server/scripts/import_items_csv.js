@@ -3,6 +3,7 @@
 const fs = require('fs');
 const crypto = require('crypto');
 const mysql = require('mysql2/promise');
+const { config } = require('../config');
 
 function parseCsv(text) {
   const rows = [];
@@ -195,11 +196,11 @@ async function main() {
   }
 
   const connection = await mysql.createConnection({
-    host: process.env.MYSQL_HOST || '127.0.0.1',
-    port: Number(process.env.MYSQL_PORT || 3306),
-    user: process.env.MYSQL_USER || 'root',
-    password: process.env.MYSQL_PASSWORD || 'apple',
-    database: process.env.MYSQL_DATABASE || 'mobile_app_db',
+    host: config.mysql.host,
+    port: config.mysql.port,
+    user: config.mysql.user,
+    password: config.mysql.password,
+    database: config.mysql.database,
   });
 
   const insertSql = `

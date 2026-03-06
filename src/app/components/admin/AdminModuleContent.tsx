@@ -370,7 +370,7 @@ function AdminModuleContent(props: Props) {
               <View key={item.id} style={[styles.rowCard, { backgroundColor: theme.panelSoft }]}>
                 <View style={{ flex: 1 }}>
                   <Text style={[styles.itemText, { color: theme.text }]}>{`${item.name} (${item.sku})`}</Text>
-                  <Text style={[styles.small, { color: theme.subtext }]}>{`${item.brand || 'General'} • ${item.category} • ${item.capacityAh || '150Ah'} • Qty ${item.qty}`}</Text>
+                  <Text style={[styles.small, { color: theme.subtext }]}>{`${item.brand || '—'} • ${item.category} • ${item.capacityAh || '150Ah'} • Qty ${item.qty}`}</Text>
                 </View>
                 <Text style={[styles.itemText, { color: statusColor }]}>{item.status}</Text>
                 <Pressable

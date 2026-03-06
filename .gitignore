@@ -78,6 +78,8 @@ yarn-error.log
 .env
 .env.*
 !.env.example
+config/*.env
+!config/*.env.example
 
 # Logs / temp
 *.log

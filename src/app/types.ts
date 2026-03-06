@@ -163,6 +163,11 @@ export type ProfileOrder = {
   itemCount: number;
   total: number;
   status: 'Processing' | 'Delivered' | 'Cancelled';
+  productId?: string | null;
+  brand?: string;
+  category?: string;
+  model?: string;
+  thumbnail?: string;
 };
 
 export type ProfilePaymentMethod = {
