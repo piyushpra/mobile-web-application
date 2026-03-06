@@ -18,3 +18,9 @@ source ~/.zshrc
 
 to build android
 -> ./android/gradlew -p android assembleRelease
+
+--------------
+Manual trigger if needed:
+
+cd /opt/mobile/mobile-web-application
+npm run release:android:auto
