@@ -145,14 +145,35 @@ Relevant files:
 
 For each Android release:
 
-1. Update the Android app version in `android/app/build.gradle`
-   - `versionCode` must increase every release
-   - `versionName` should match the manifest version, for example `1.0.1`
+1. Prepare the Android release version.
+
+```sh
+npm run prepare:android-release
+```
+
+This automatically:
+
+- increments `versionCode` by `1`
+- bumps `versionName` by patch version, for example `1.0.0` -> `1.0.1`
+- updates `src/app/constants.ts` so the JS fallback version matches
+
+If you want a specific release version:
+
+```sh
+npm run prepare:android-release -- 1.2.0
+```
+
+Optional:
+
+```sh
+npm run prepare:android-release -- 1.2.0 --version-code 42
+```
+
 2. Build the signed release APK.
 3. Publish the APK and update the manifest:
 
 ```sh
-npm run publish:android-update -- android/app/build/outputs/apk/release/app-release.apk 1.0.1 --notes "Bug fixes and performance improvements."
+npm run publish:android-update -- android/app/build/outputs/apk/release/app-release.apk --notes "Bug fixes and performance improvements."
 ```
 
 This command:
@@ -161,6 +182,12 @@ This command:
 - updates `server/data/generated/app_update_manifest.json`
 - sets the Android download URL to `/static/app-updates/mobile-1.0.1.apk`
 - calculates and stores `checksumSha256`, `fileSizeBytes`, and `publishedAt`
+
+If needed, you can still pass the version explicitly:
+
+```sh
+npm run publish:android-update -- android/app/build/outputs/apk/release/app-release.apk 1.0.1 --notes "Bug fixes and performance improvements."
+```
 
 Optional flags:
 
@@ -190,3 +217,51 @@ Important:
 - users may need to allow installs from unknown apps on their device
 - use a release keystore for long-term updates; debug signing is only a fallback for testing
 - for production, prefer HTTPS and a domain instead of a raw HTTP IP
+
+## Auto Release On `git pull`
+
+If you want EC2 to automatically build and publish a new Android APK whenever `git pull` brings new code changes, install the repo-managed Git hooks once:
+
+```sh
+cd /opt/mobile/mobile-web-application
+npm run install:git-hooks
+```
+
+This configures `core.hooksPath` to use `.githooks/`.
+
+What happens after a pull:
+
+- the `post-merge` or `post-rewrite` hook runs `node scripts/ec2-auto-release.js`
+- it skips if the pull did not change release-relevant files
+- it recreates `android/local.properties` from `ANDROID_SDK_ROOT` or `/home/ubuntu/Android/Sdk`
+- it runs `npm ci` only if package files changed or `node_modules` is missing
+- it computes the next release version without modifying tracked files
+- it builds the APK with Gradle version overrides
+- it publishes the APK and update manifest
+- it restarts `mobile-api` with `APP_ENV=production`
+
+Runtime-only state written on EC2:
+
+- APKs: `server/data/generated/app-updates/`
+- live update manifest: `server/data/generated/app_update_manifest.json`
+- auto-release state: `server/data/generated/android_release_state.json`
+
+Useful environment variables on EC2:
+
+```sh
+export ANDROID_SDK_ROOT=/home/ubuntu/Android/Sdk
+export PM2_APP_NAME=mobile-api
+export APP_ENV=production
+```
+
+You can also run the same auto-release manually:
+
+```sh
+cd /opt/mobile/mobile-web-application
+npm run release:android:auto
+```
+
+Important tradeoff:
+
+- every qualifying `git pull` will create a new APK version
+- if that is too aggressive, use this only on a release branch or trigger it manually

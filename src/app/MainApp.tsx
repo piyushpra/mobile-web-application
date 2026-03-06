@@ -139,6 +139,11 @@ function compareVersionStrings(left: string, right: string) {
   return 0;
 }
 
+function toFetchError(url: string, err: unknown, fallback = 'Request failed') {
+  const message = err instanceof Error ? err.message : fallback;
+  return new Error(`${message} [${url}]`);
+}
+
 function MainApp() {
   const insets = useSafeAreaInsets();
   const { width: viewportWidth } = useWindowDimensions();
@@ -372,6 +377,7 @@ function MainApp() {
 
   const locationApiRequest = async <T,>(path: string, init?: RequestInit): Promise<T> => {
     const runRequest = async (authToken: string | null) => {
+      const url = `${API_BASE}${path}`;
       const headers: Record<string, string> = {
         'Content-Type': 'application/json',
         ...(init?.headers as Record<string, string> | undefined),
@@ -379,7 +385,12 @@ function MainApp() {
       if (authToken) {
         headers.Authorization = `Bearer ${authToken}`;
       }
-      const res = await fetch(`${API_BASE}${path}`, { ...init, headers });
+      let res: Response;
+      try {
+        res = await fetch(url, { ...init, headers });
+      } catch (err) {
+        throw toFetchError(url, err, 'Location request failed');
+      }
       const json = await parseResponseSafe(res);
       return { res, json };
     };
@@ -403,6 +414,7 @@ function MainApp() {
 
   const apiRequest = async <T,>(path: string, init?: RequestInit): Promise<T> => {
     const runRequest = async (authToken: string | null) => {
+      const url = `${API_BASE}${path}`;
       const headers: Record<string, string> = {
         'Content-Type': 'application/json',
         ...(init?.headers as Record<string, string> | undefined),
@@ -410,10 +422,15 @@ function MainApp() {
       if (authToken) {
         headers.Authorization = `Bearer ${authToken}`;
       }
-      const response = await fetch(`${API_BASE}${path}`, {
-        ...init,
-        headers,
-      });
+      let response: Response;
+      try {
+        response = await fetch(url, {
+          ...init,
+          headers,
+        });
+      } catch (err) {
+        throw toFetchError(url, err);
+      }
       const json = await parseResponseSafe(response);
       return { response, json };
     };
@@ -445,10 +462,15 @@ function MainApp() {
       const url = new URL(`${API_BASE}${path}`);
       url.searchParams.set('guestId', guestIdRef.current);
 
-      const res = await fetch(url.toString(), {
-        ...init,
-        headers,
-      });
+      let res: Response;
+      try {
+        res = await fetch(url.toString(), {
+          ...init,
+          headers,
+        });
+      } catch (err) {
+        throw toFetchError(url.toString(), err);
+      }
       const json = await parseResponseSafe(res);
       return { res, json };
     };
@@ -1194,7 +1216,13 @@ function MainApp() {
     }
     try {
       setIsPublicLoading(true);
-      const stockRes = await fetch(`${API_BASE}/api/public/stock`);
+      const stockUrl = `${API_BASE}/api/public/stock`;
+      let stockRes: Response;
+      try {
+        stockRes = await fetch(stockUrl);
+      } catch (err) {
+        throw toFetchError(stockUrl, err, 'Failed to load public stock');
+      }
       const stockJson = await stockRes.json();
       if (!stockRes.ok) {
         throw new Error(stockJson.error || 'Failed to load public stock');
@@ -1203,7 +1231,8 @@ function MainApp() {
 
       // Try products endpoint first; fallback to stock-derived cards if unavailable.
       try {
-        const productsRes = await fetch(`${API_BASE}/api/public/products`);
+        const productsUrl = `${API_BASE}/api/public/products`;
+        const productsRes = await fetch(productsUrl);
         const productsJson = await productsRes.json();
         if (productsRes.ok && Array.isArray(productsJson.products)) {
           setPublicProducts(productsJson.products);
@@ -1315,7 +1344,13 @@ function MainApp() {
     try {
       setIsPublicDetailLoading(true);
       setError(null);
-      const res = await fetch(`${API_BASE}/api/public/products/${productId}`);
+      const detailUrl = `${API_BASE}/api/public/products/${productId}`;
+      let res: Response;
+      try {
+        res = await fetch(detailUrl);
+      } catch (err) {
+        throw toFetchError(detailUrl, err, 'Failed to load product details');
+      }
       const json = await res.json();
       if (!res.ok) {
         throw new Error(json.error || 'Failed to load product details');

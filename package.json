@@ -5,9 +5,12 @@
   "scripts": {
     "android": "react-native run-android",
     "ios": "react-native run-ios",
+    "install:git-hooks": "bash scripts/install-git-hooks.sh",
     "lint": "eslint .",
     "postinstall": "node scripts/postinstall.js",
+    "prepare:android-release": "node scripts/prepare-android-release.js",
     "publish:android-update": "node scripts/publish-android-update.js",
+    "release:android:auto": "node scripts/ec2-auto-release.js",
     "server": "node server/index.js",
     "dev:server": "node --watch server/index.js",
     "start": "react-native start",

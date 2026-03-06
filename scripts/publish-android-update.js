@@ -17,16 +17,34 @@ function readJson(filePath, fallback) {
   }
 }
 
-function parseArgs(argv) {
-  if (argv.length < 2) {
+function readAndroidVersionName(repoRoot) {
+  const gradlePath = path.join(repoRoot, 'android', 'app', 'build.gradle');
+  try {
+    const gradleText = fs.readFileSync(gradlePath, 'utf8');
+    const match = gradleText.match(/trackedVersionName\s*=\s*"([^"]+)"/);
+    return String(match?.[1] || '').trim();
+  } catch {
+    return '';
+  }
+}
+
+function parseArgs(argv, defaultVersion) {
+  if (argv.includes('--help') || argv.includes('-h')) {
+    process.stdout.write(
+      'Usage: node scripts/publish-android-update.js <apk-path> [version] [--min-supported <version>] [--mandatory] [--app-id <id>] [--channel <name>] [--notes <text>]\n',
+    );
+    process.exit(0);
+  }
+
+  if (argv.length < 1) {
     fail(
-      'Usage: node scripts/publish-android-update.js <apk-path> <version> [--min-supported <version>] [--mandatory] [--notes <text>]',
+      'Usage: node scripts/publish-android-update.js <apk-path> [version] [--min-supported <version>] [--mandatory] [--notes <text>]',
     );
   }
 
   const options = {
     apkPath: argv[0],
-    version: argv[1],
+    version: '',
     appId: 'com.mobile',
     channel: 'production',
     minSupportedVersion: '',
@@ -34,7 +52,15 @@ function parseArgs(argv) {
     releaseNotes: '',
   };
 
-  for (let index = 2; index < argv.length; index += 1) {
+  let index = 1;
+  if (argv[1] && !argv[1].startsWith('--')) {
+    options.version = String(argv[1]).trim();
+    index = 2;
+  } else {
+    options.version = defaultVersion;
+  }
+
+  for (; index < argv.length; index += 1) {
     const arg = argv[index];
     if (arg === '--mandatory') {
       options.mandatory = true;
@@ -64,7 +90,7 @@ function parseArgs(argv) {
   }
 
   if (!options.version) {
-    fail('Version is required.');
+    fail('Version is required. Pass it explicitly or set versionName in android/app/build.gradle.');
   }
 
   return options;
@@ -80,7 +106,7 @@ const repoRoot = path.resolve(__dirname, '..');
 const updatesDir = path.join(repoRoot, 'server', 'data', 'generated', 'app-updates');
 const runtimeManifestPath = path.join(repoRoot, 'server', 'data', 'generated', 'app_update_manifest.json');
 const defaultManifestPath = path.join(repoRoot, 'server', 'data', 'app_update_manifest.json');
-const args = parseArgs(process.argv.slice(2));
+const args = parseArgs(process.argv.slice(2), readAndroidVersionName(repoRoot));
 const sourceApkPath = path.resolve(process.cwd(), args.apkPath);
 
 if (!fs.existsSync(sourceApkPath)) {
