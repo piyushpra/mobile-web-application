@@ -5,6 +5,12 @@ const path = require('path');
 const crypto = require('crypto');
 const mysql = require('mysql2/promise');
 const { config } = require('./config');
+let nodemailer = null;
+try {
+  nodemailer = require('nodemailer');
+} catch {
+  nodemailer = null;
+}
 
 const PORT = config.port;
 const SESSION_TTL_MS = config.sessionTtlMs;
@@ -13,6 +19,16 @@ const MYSQL_PORT = config.mysql.port;
 const MYSQL_USER = config.mysql.user;
 const MYSQL_PASSWORD = config.mysql.password;
 const MYSQL_DATABASE = config.mysql.database;
+const APP_NAME = config.appName;
+const AUTH_PUBLIC_BASE_URL = config.auth.publicBaseUrl;
+const AUTH_RESET_TOKEN_TTL_MS = config.auth.resetTokenTtlMs;
+const AUTH_RESET_REQUEST_COOLDOWN_MS = config.auth.resetRequestCooldownMs;
+const SMTP_HOST = config.mail.host;
+const SMTP_PORT = config.mail.port;
+const SMTP_SECURE = config.mail.secure;
+const SMTP_USER = config.mail.user;
+const SMTP_PASSWORD = config.mail.password;
+const SMTP_FROM = config.mail.from;
 const STATIC_URL_PREFIX = '/static/';
 const STATIC_ROOT = path.join(__dirname, 'data', 'generated');
 const ITEM_UPLOAD_DIR = path.join(STATIC_ROOT, 'product-images', 'items');
@@ -72,6 +88,19 @@ let appUpdateManifestCache = null;
 let appUpdateManifestLoadedAt = 0;
 
 let writeQueue = Promise.resolve();
+let mailTransport = null;
+const passwordResetRequestLimiter = new Map();
+
+const PASSWORD_HASH_ALGORITHM = 'scrypt';
+const PASSWORD_HASH_KEYLEN = 64;
+const PASSWORD_HASH_SALT_BYTES = 16;
+const PASSWORD_HASH_OPTIONS = {
+  N: 16384,
+  r: 8,
+  p: 1,
+  maxmem: 32 * 1024 * 1024,
+};
+const PASSWORD_RESET_TOKEN_BYTES = 32;
 
 const defaultDb = {
   items: [],
@@ -114,6 +143,347 @@ function compareAppVersions(left, right) {
     if (a < b) return -1;
   }
   return 0;
+}
+
+function isPasswordHash(value) {
+  return String(value || '').startsWith(`${PASSWORD_HASH_ALGORITHM}$`);
+}
+
+function scryptAsync(password, salt, keylen, options) {
+  return new Promise((resolve, reject) => {
+    crypto.scrypt(password, salt, keylen, options, (error, derivedKey) => {
+      if (error) {
+        reject(error);
+        return;
+      }
+      resolve(derivedKey);
+    });
+  });
+}
+
+function parsePasswordHash(value) {
+  const raw = String(value || '').trim();
+  const parts = raw.split('$');
+  if (parts.length !== 6) {
+    return null;
+  }
+  const [algorithm, n, r, p, salt, hash] = parts;
+  if (algorithm !== PASSWORD_HASH_ALGORITHM || !salt || !hash) {
+    return null;
+  }
+  const N = parseNumber(n, 0);
+  const R = parseNumber(r, 0);
+  const P = parseNumber(p, 0);
+  if (!Number.isInteger(N) || !Number.isInteger(R) || !Number.isInteger(P) || N <= 0 || R <= 0 || P <= 0) {
+    return null;
+  }
+  return {
+    N,
+    r: R,
+    p: P,
+    salt,
+    hash,
+  };
+}
+
+async function hashPassword(password) {
+  const raw = String(password || '');
+  const salt = crypto.randomBytes(PASSWORD_HASH_SALT_BYTES).toString('hex');
+  const derivedKey = await scryptAsync(raw, salt, PASSWORD_HASH_KEYLEN, PASSWORD_HASH_OPTIONS);
+  return [
+    PASSWORD_HASH_ALGORITHM,
+    PASSWORD_HASH_OPTIONS.N,
+    PASSWORD_HASH_OPTIONS.r,
+    PASSWORD_HASH_OPTIONS.p,
+    salt,
+    derivedKey.toString('hex'),
+  ].join('$');
+}
+
+async function ensurePasswordHash(password) {
+  const raw = String(password || '').trim();
+  if (!raw) {
+    return '';
+  }
+  if (isPasswordHash(raw)) {
+    return raw;
+  }
+  return hashPassword(raw);
+}
+
+async function verifyPassword(password, storedValue) {
+  const rawPassword = String(password || '');
+  const stored = String(storedValue || '').trim();
+  const parsed = parsePasswordHash(stored);
+  if (!parsed) {
+    return rawPassword === stored;
+  }
+  const derivedKey = await scryptAsync(rawPassword, parsed.salt, PASSWORD_HASH_KEYLEN, {
+    N: parsed.N,
+    r: parsed.r,
+    p: parsed.p,
+    maxmem: PASSWORD_HASH_OPTIONS.maxmem,
+  });
+  const storedHash = Buffer.from(parsed.hash, 'hex');
+  if (storedHash.length !== derivedKey.length) {
+    return false;
+  }
+  return crypto.timingSafeEqual(storedHash, derivedKey);
+}
+
+function escapeHtml(value) {
+  return String(value || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function getClientIp(req) {
+  const forwarded = String(req?.headers?.['x-forwarded-for'] || '')
+    .split(',')[0]
+    .trim();
+  if (forwarded) {
+    return forwarded;
+  }
+  return String(req?.socket?.remoteAddress || '').trim() || 'unknown';
+}
+
+function getAuthBaseUrl(req) {
+  const configured = String(AUTH_PUBLIC_BASE_URL || '').trim();
+  if (configured) {
+    return configured.replace(/\/+$/, '');
+  }
+  return getRequestBaseUrl(req);
+}
+
+function getPasswordResetExpiryDate() {
+  return new Date(Date.now() + AUTH_RESET_TOKEN_TTL_MS);
+}
+
+function cleanupPasswordResetThrottle() {
+  const now = Date.now();
+  for (const [key, expiresAt] of passwordResetRequestLimiter.entries()) {
+    if (expiresAt <= now) {
+      passwordResetRequestLimiter.delete(key);
+    }
+  }
+}
+
+function enforcePasswordResetThrottle(req, username) {
+  cleanupPasswordResetThrottle();
+  const normalizedUsername = String(username || '').trim().toLowerCase();
+  const key = `${getClientIp(req)}|${normalizedUsername}`;
+  const now = Date.now();
+  const expiresAt = passwordResetRequestLimiter.get(key) || 0;
+  if (expiresAt > now) {
+    throw createHttpError(429, 'Please wait before requesting another reset email.');
+  }
+  passwordResetRequestLimiter.set(key, now + AUTH_RESET_REQUEST_COOLDOWN_MS);
+}
+
+function isMailConfigured() {
+  return Boolean(SMTP_HOST && SMTP_PORT && SMTP_FROM);
+}
+
+function getMailTransport() {
+  if (!nodemailer) {
+    throw new Error('nodemailer is not installed');
+  }
+  if (!isMailConfigured()) {
+    throw new Error('SMTP is not configured');
+  }
+  if (mailTransport) {
+    return mailTransport;
+  }
+  const transportConfig = {
+    host: SMTP_HOST,
+    port: SMTP_PORT,
+    secure: SMTP_SECURE,
+  };
+  if (SMTP_USER) {
+    transportConfig.auth = {
+      user: SMTP_USER,
+      pass: SMTP_PASSWORD,
+    };
+  }
+  mailTransport = nodemailer.createTransport(transportConfig);
+  return mailTransport;
+}
+
+async function sendMail(message) {
+  const transport = getMailTransport();
+  await transport.sendMail(message);
+}
+
+function buildPasswordResetEmail({ name, resetUrl, expiresAt }) {
+  const expiryMinutes = Math.max(1, Math.round((new Date(expiresAt).getTime() - Date.now()) / 60000));
+  const safeName = escapeHtml(name || 'there');
+  const safeAppName = escapeHtml(APP_NAME);
+  const safeUrl = escapeHtml(resetUrl);
+  const html = `<!doctype html>
+<html lang="en">
+  <body style="margin:0;padding:24px;background:#f3f4f6;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;color:#111827;">
+    <div style="max-width:560px;margin:0 auto;background:#ffffff;border-radius:16px;padding:32px;border:1px solid #e5e7eb;">
+      <p style="margin:0 0 12px;font-size:14px;color:#6b7280;">${safeAppName}</p>
+      <h1 style="margin:0 0 16px;font-size:24px;line-height:1.2;">Reset your password</h1>
+      <p style="margin:0 0 16px;font-size:15px;line-height:1.6;">Hi ${safeName},</p>
+      <p style="margin:0 0 24px;font-size:15px;line-height:1.6;">We received a request to reset your password. Use the button below to choose a new password. This link expires in about ${expiryMinutes} minutes.</p>
+      <p style="margin:0 0 24px;">
+        <a href="${safeUrl}" style="display:inline-block;background:#111827;color:#ffffff;text-decoration:none;padding:12px 18px;border-radius:10px;font-weight:600;">Reset Password</a>
+      </p>
+      <p style="margin:0 0 12px;font-size:14px;line-height:1.6;color:#374151;">If the button does not work, open this link:</p>
+      <p style="margin:0 0 24px;font-size:14px;line-height:1.6;word-break:break-all;"><a href="${safeUrl}" style="color:#2563eb;">${safeUrl}</a></p>
+      <p style="margin:0;font-size:13px;line-height:1.6;color:#6b7280;">If you did not request this, you can ignore this email.</p>
+    </div>
+  </body>
+</html>`;
+  const text = [
+    `${APP_NAME}`,
+    '',
+    `Hi ${name || 'there'},`,
+    '',
+    'We received a request to reset your password.',
+    `Open this link to set a new password: ${resetUrl}`,
+    '',
+    `This link expires at ${new Date(expiresAt).toISOString()}.`,
+    '',
+    'If you did not request this, you can ignore this email.',
+  ].join('\n');
+  return {
+    subject: `${APP_NAME} password reset`,
+    text,
+    html,
+  };
+}
+
+async function createPasswordResetToken(userId) {
+  await ensureDb();
+  const rawToken = crypto.randomBytes(PASSWORD_RESET_TOKEN_BYTES).toString('hex');
+  const tokenHash = hashToken(rawToken);
+  const expiresAt = getPasswordResetExpiryDate();
+  await mysqlPool.query(
+    `DELETE FROM password_reset_tokens
+     WHERE user_id = ?
+        OR used_at IS NOT NULL
+        OR expires_at <= CURRENT_TIMESTAMP`,
+    [userId],
+  );
+  await mysqlPool.query(
+    `INSERT INTO password_reset_tokens (id, user_id, token_hash, expires_at, used_at)
+     VALUES (?, ?, ?, ?, NULL)`,
+    [`prt_${crypto.randomUUID().slice(0, 8)}`, userId, tokenHash, expiresAt],
+  );
+  return {
+    token: rawToken,
+    expiresAt,
+  };
+}
+
+async function revokeUserSessions(userId) {
+  if (!userId) {
+    return;
+  }
+  sessions.forEach((session, token) => {
+    if (session && session.userId === userId) {
+      sessions.delete(token);
+    }
+  });
+  await mysqlPool.query(
+    `UPDATE user_sessions
+     SET revoked_at = COALESCE(revoked_at, CURRENT_TIMESTAMP)
+     WHERE user_id = ?
+       AND revoked_at IS NULL`,
+    [userId],
+  );
+}
+
+function renderResetPasswordPage(token, errorMessage = '') {
+  const safeToken = escapeHtml(token);
+  const safeError = escapeHtml(errorMessage);
+  return `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>${escapeHtml(APP_NAME)} Password Reset</title>
+    <style>
+      :root { color-scheme: light; }
+      body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: linear-gradient(180deg, #111827 0%, #1f2937 100%); color: #111827; min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 24px; box-sizing: border-box; }
+      .card { width: 100%; max-width: 420px; background: #fff; border-radius: 18px; padding: 28px; box-shadow: 0 30px 60px rgba(0,0,0,.25); }
+      h1 { margin: 0 0 10px; font-size: 28px; }
+      p { margin: 0 0 16px; color: #4b5563; line-height: 1.6; }
+      label { display: block; margin: 0 0 8px; font-size: 14px; font-weight: 600; color: #111827; }
+      input { width: 100%; box-sizing: border-box; padding: 12px 14px; border: 1px solid #d1d5db; border-radius: 12px; font-size: 15px; margin-bottom: 14px; }
+      button { width: 100%; border: 0; border-radius: 12px; padding: 12px 16px; background: #111827; color: #fff; font-size: 15px; font-weight: 700; cursor: pointer; }
+      button:disabled { opacity: .65; cursor: wait; }
+      .message { margin-top: 14px; font-size: 14px; line-height: 1.5; }
+      .error { color: #b91c1c; }
+      .success { color: #047857; }
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <p>${escapeHtml(APP_NAME)}</p>
+      <h1>Set a new password</h1>
+      <p>Enter your new password below. This reset link can only be used once.</p>
+      <form id="reset-form">
+        <input type="hidden" name="token" value="${safeToken}" />
+        <label for="password">New password</label>
+        <input id="password" name="password" type="password" minlength="6" autocomplete="new-password" required />
+        <label for="confirmPassword">Confirm password</label>
+        <input id="confirmPassword" name="confirmPassword" type="password" minlength="6" autocomplete="new-password" required />
+        <button id="submit-btn" type="submit">Reset Password</button>
+      </form>
+      <div id="message" class="message ${safeError ? 'error' : ''}">${safeError}</div>
+    </div>
+    <script>
+      const form = document.getElementById('reset-form');
+      const messageEl = document.getElementById('message');
+      const submitBtn = document.getElementById('submit-btn');
+      form.addEventListener('submit', async event => {
+        event.preventDefault();
+        const formData = new FormData(form);
+        const password = String(formData.get('password') || '');
+        const confirmPassword = String(formData.get('confirmPassword') || '');
+        const token = String(formData.get('token') || '');
+        if (password.length < 6) {
+          messageEl.className = 'message error';
+          messageEl.textContent = 'Password must be at least 6 characters.';
+          return;
+        }
+        if (password !== confirmPassword) {
+          messageEl.className = 'message error';
+          messageEl.textContent = 'Passwords do not match.';
+          return;
+        }
+        submitBtn.disabled = true;
+        messageEl.className = 'message';
+        messageEl.textContent = 'Saving...';
+        try {
+          const response = await fetch('/api/auth/reset-password', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ token, password, confirmPassword }),
+          });
+          const payload = await response.json().catch(() => ({}));
+          if (!response.ok) {
+            throw new Error(payload.error || 'Unable to reset password.');
+          }
+          form.reset();
+          submitBtn.disabled = true;
+          messageEl.className = 'message success';
+          messageEl.textContent = payload.message || 'Password updated. You can return to the app and sign in.';
+        } catch (error) {
+          submitBtn.disabled = false;
+          messageEl.className = 'message error';
+          messageEl.textContent = error instanceof Error ? error.message : 'Unable to reset password.';
+        }
+      });
+    </script>
+  </body>
+</html>`;
 }
 
 function getDefaultAppUpdateManifest() {
@@ -203,11 +573,35 @@ function computeStatus(qty, reorderPoint = 8) {
 }
 
 const AH_OPTIONS = ['110Ah', '120Ah', '150Ah', '200Ah', '220Ah'];
+const ITEM_CATEGORY_OPTIONS = ['Battery', 'Inverter', 'Miscellaneous'];
+const ITEM_TECHNOLOGY_OPTIONS = ['Sinewave', 'Eco Watt', 'Advanced Digital'];
 const ITEM_TAGS = ['bestseller', 'premium'];
 
 function normalizeCapacityAh(value) {
   const raw = String(value || '').trim();
   return AH_OPTIONS.includes(raw) ? raw : '150Ah';
+}
+
+function normalizeTechnologyOption(value) {
+  const raw = String(value || '').trim();
+  if (!raw) {
+    return '';
+  }
+  const normalized = raw.toLowerCase();
+  if (normalized === 'sinewave' || normalized === 'sine wave' || normalized === 'pure sine wave') {
+    return 'Sinewave';
+  }
+  if (normalized === 'eco watt' || normalized === 'ecowatt') {
+    return 'Eco Watt';
+  }
+  if (
+    normalized === 'advanced digital' ||
+    normalized === 'advanced-digital' ||
+    normalized === 'advanceddigital'
+  ) {
+    return 'Advanced Digital';
+  }
+  return ITEM_TECHNOLOGY_OPTIONS.includes(raw) ? raw : '';
 }
 
 function normalizeItemTags(tags) {
@@ -252,12 +646,22 @@ function normalizeBrand(value) {
 function normalizeCategory(value) {
   const category = String(value || '').trim();
   if (!category) {
-    return 'Misc';
+    return 'Miscellaneous';
   }
-  if (category.toLowerCase() === 'general') {
-    return 'Misc';
+  const normalized = category.toLowerCase();
+  if (normalized === 'general' || normalized === 'misc' || normalized === 'miscellaneous') {
+    return 'Miscellaneous';
   }
-  return category;
+  if (normalized.includes('battery')) {
+    return 'Battery';
+  }
+  if (normalized.includes('inverter') || normalized.includes('power backup') || normalized.includes('ups')) {
+    return 'Inverter';
+  }
+  if (normalized.includes('accessor')) {
+    return 'Miscellaneous';
+  }
+  return ITEM_CATEGORY_OPTIONS.includes(category) ? category : 'Miscellaneous';
 }
 
 function normalizeItem(item) {
@@ -274,6 +678,7 @@ function normalizeItem(item) {
     name: item.name || 'Unnamed Item',
     model: item.model || item.sku || `MODEL-${id.slice(-4).toUpperCase()}`,
     capacityAh: normalizeCapacityAh(item.capacityAh || item.capacity_ah),
+    technologyOption: normalizeTechnologyOption(item.technologyOption || item.technology_option),
     sku: item.sku || `HSN-SAC-${id.toUpperCase()}`,
     category: normalizeCategory(item.category),
     unit: item.unit || 'pcs',
@@ -518,8 +923,27 @@ async function ensureDb() {
     try {
       await conn.query('SELECT 1');
 
+      await conn.query(
+        `CREATE TABLE IF NOT EXISTS password_reset_tokens (
+          id VARCHAR(64) NOT NULL,
+          user_id VARCHAR(64) NOT NULL,
+          token_hash CHAR(64) NOT NULL,
+          expires_at DATETIME NOT NULL,
+          used_at DATETIME NULL,
+          created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          PRIMARY KEY (id),
+          UNIQUE KEY uq_password_reset_tokens_token_hash (token_hash),
+          KEY idx_password_reset_tokens_user_expires (user_id, expires_at),
+          CONSTRAINT fk_password_reset_tokens_user
+            FOREIGN KEY (user_id) REFERENCES users(id)
+            ON DELETE CASCADE
+            ON UPDATE CASCADE
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+      );
+
       const requiredTables = [
         'users',
+        'password_reset_tokens',
         'products',
         'product_images',
         'stock_movements',
@@ -581,6 +1005,21 @@ async function ensureDb() {
         await conn.query(
           `ALTER TABLE products
            ADD COLUMN tags VARCHAR(255) NULL AFTER brand`,
+        );
+      }
+
+      const [technologyColumnRows] = await conn.query(
+        `SELECT column_name
+         FROM information_schema.columns
+         WHERE table_schema = ?
+           AND table_name = 'products'
+           AND column_name = 'technology_option'`,
+        [MYSQL_DATABASE],
+      );
+      if (!Array.isArray(technologyColumnRows) || technologyColumnRows.length === 0) {
+        await conn.query(
+          `ALTER TABLE products
+           ADD COLUMN technology_option VARCHAR(40) NULL AFTER capacity_ah`,
         );
       }
 
@@ -990,12 +1429,36 @@ async function ensureDb() {
       );
 
       for (const u of DEFAULT_USERS) {
+        const storedPassword = await ensurePasswordHash(u.password);
         await conn.query(
           `INSERT IGNORE INTO users (id, username, password_hash, role, full_name, is_active)
            VALUES (?, ?, ?, ?, ?, 1)`,
-          [u.id, u.username, u.password, u.role, u.name],
+          [u.id, u.username, storedPassword, u.role, u.name],
         );
       }
+
+      const [userPasswordRows] = await conn.query(
+        `SELECT id, password_hash
+         FROM users`,
+      );
+      for (const row of Array.isArray(userPasswordRows) ? userPasswordRows : []) {
+        const storedPassword = String(row.password_hash || '').trim();
+        if (!storedPassword || isPasswordHash(storedPassword)) {
+          continue;
+        }
+        await conn.query(
+          `UPDATE users
+           SET password_hash = ?
+           WHERE id = ?`,
+          [await hashPassword(storedPassword), row.id],
+        );
+      }
+
+      await conn.query(
+        `DELETE FROM password_reset_tokens
+         WHERE used_at IS NOT NULL
+            OR expires_at <= CURRENT_TIMESTAMP`,
+      );
 
       let rank = DEFAULT_LOCATION_SUGGESTIONS.length;
       for (const raw of DEFAULT_LOCATION_SUGGESTIONS) {
@@ -1046,7 +1509,7 @@ async function ensureDb() {
         if (error && (error.code === 'ER_ROW_IS_REFERENCED_2' || error.code === 'ER_ROW_IS_REFERENCED')) {
           await conn.query(
             `UPDATE products
-             SET category = 'Misc'
+             SET category = 'Miscellaneous'
              WHERE LOWER(TRIM(COALESCE(category, ''))) = 'general'`,
           );
         } else {
@@ -1099,7 +1562,7 @@ async function readDb() {
     suggestionRows,
   ] = await Promise.all([
     mysqlPool.query(
-      `SELECT id, item_type, name, model, capacity_ah, sku, category, unit, brand, tags, description, hsn_code,
+      `SELECT id, item_type, name, model, capacity_ah, technology_option, sku, category, unit, brand, tags, description, hsn_code,
               location, qty_on_hand, reorder_point, purchase_price, selling_price, tax_rate, updated_at
        FROM products
        ORDER BY updated_at DESC`,
@@ -1270,6 +1733,7 @@ async function readDb() {
       name: row.name,
       model: row.model,
       capacityAh: row.capacity_ah,
+      technologyOption: row.technology_option,
       sku: row.sku,
       category: row.category,
       unit: row.unit,
@@ -1586,6 +2050,7 @@ function writeDb(db) {
       }
 
       for (const u of uniqueUsers) {
+        const storedPassword = await ensurePasswordHash(u.password);
         await conn.query(
           `INSERT INTO users (id, username, password_hash, role, full_name, phone, is_active)
            VALUES (?, ?, ?, ?, ?, ?, 1)
@@ -1596,7 +2061,7 @@ function writeDb(db) {
              full_name = VALUES(full_name),
              phone = VALUES(phone),
              is_active = 1`,
-          [u.id, u.username, u.password, u.role, u.name, null],
+          [u.id, u.username, storedPassword, u.role, u.name, null],
         );
       }
 
@@ -1643,15 +2108,16 @@ function writeDb(db) {
       for (const item of normalized.items) {
         await conn.query(
           `INSERT INTO products
-            (id, item_type, name, model, capacity_ah, sku, category, unit, brand, tags, description, hsn_code, tax_rate, location,
+            (id, item_type, name, model, capacity_ah, technology_option, sku, category, unit, brand, tags, description, hsn_code, tax_rate, location,
              qty_on_hand, reorder_point, purchase_price, selling_price, is_active, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)`,
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)`,
           [
             item.id,
             item.itemType || 'Goods',
             item.name,
             item.model || item.sku,
             normalizeCapacityAh(item.capacityAh),
+            normalizeTechnologyOption(item.technologyOption),
             item.sku,
             normalizeCategory(item.category),
             item.unit || 'pcs',
@@ -1947,6 +2413,16 @@ function sendJson(res, status, payload, extraHeaders = null) {
     ...(extraHeaders || {}),
   });
   res.end(JSON.stringify(payload));
+}
+
+function sendHtml(res, status, html, extraHeaders = null) {
+  res.writeHead(status, {
+    'Content-Type': 'text/html; charset=utf-8',
+    'Cache-Control': 'no-store, max-age=0',
+    'X-Content-Type-Options': 'nosniff',
+    ...(extraHeaders || {}),
+  });
+  res.end(String(html || ''));
 }
 
 function sendError(res, status, message) {
@@ -2780,6 +3256,16 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
+    if (pathname === '/reset-password' && req.method === 'GET') {
+      const token = String(searchParams.get('token') || '').trim();
+      if (!token) {
+        sendHtml(res, 400, renderResetPasswordPage('', 'Reset token is missing.'));
+        return;
+      }
+      sendHtml(res, 200, renderResetPasswordPage(token));
+      return;
+    }
+
     if (pathname === '/api/public/stock' && req.method === 'GET') {
       const db = await readDb();
       const search = (searchParams.get('search') || '').trim().toLowerCase();
@@ -2852,7 +3338,7 @@ const server = http.createServer(async (req, res) => {
       const search = (searchParams.get('search') || '').trim().toLowerCase();
       const products = db.items
         .filter(item => {
-          const text = `${item.name} ${item.model || ''} ${item.brand || ''} ${item.category}`.toLowerCase();
+          const text = `${item.name} ${item.model || ''} ${item.brand || ''} ${item.category} ${item.technologyOption || ''}`.toLowerCase();
           return !search || text.includes(search);
         })
         .map(item => {
@@ -2868,6 +3354,7 @@ const server = http.createServer(async (req, res) => {
             model: item.model || item.sku,
             brand: item.brand,
             category: item.category,
+            technologyOption: item.technologyOption || undefined,
             tags: normalizeItemTags(item.tags),
             shortDescription: item.description || `${item.category} product`,
             thumbnail: resolveAssetUrl(req, item.images && item.images[0] ? item.images[0] : ''),
@@ -2888,11 +3375,15 @@ const server = http.createServer(async (req, res) => {
         sendError(res, 404, 'Product not found');
         return;
       }
-      const baseKey = `${item.name}|${item.model || item.sku}|${item.brand || ''}|${item.category}`.toLowerCase();
+      const baseKey = `${item.name}|${item.model || item.sku}|${item.brand || ''}|${item.category}|${item.technologyOption || ''}`.toLowerCase();
       const availableCapacities = Array.from(
         new Set(
           db.items
-            .filter(p => `${p.name}|${p.model || p.sku}|${p.brand || ''}|${p.category}`.toLowerCase() === baseKey)
+            .filter(
+              p =>
+                `${p.name}|${p.model || p.sku}|${p.brand || ''}|${p.category}|${p.technologyOption || ''}`.toLowerCase() ===
+                baseKey,
+            )
             .map(p => normalizeCapacityAh(p.capacityAh))
             .filter(cap => AH_OPTIONS.includes(cap)),
         ),
@@ -2910,6 +3401,7 @@ const server = http.createServer(async (req, res) => {
           model: item.model || item.sku,
           brand: item.brand,
           category: item.category,
+          technologyOption: item.technologyOption || undefined,
           tags: normalizeItemTags(item.tags),
           description: item.description || `${item.category} product for power backup needs.`,
           images: resolveAssetUrls(req, item.images || []),
@@ -2948,20 +3440,156 @@ const server = http.createServer(async (req, res) => {
         [username],
       );
       const row = Array.isArray(rows) ? rows[0] : null;
-      if (!row || String(row.password_hash || '') !== password) {
+      const storedPassword = String(row?.password_hash || '').trim();
+      const isPasswordValid = row ? await verifyPassword(password, storedPassword) : false;
+      if (!row || !isPasswordValid) {
         sendError(res, 401, 'Invalid username or password');
         return;
+      }
+
+      if (row && storedPassword && !isPasswordHash(storedPassword)) {
+        await mysqlPool.query(
+          `UPDATE users
+           SET password_hash = ?
+           WHERE id = ?`,
+          [await hashPassword(storedPassword), row.id],
+        );
       }
 
       const user = normalizeUser({
         id: row.id,
         username: row.username,
-        password: row.password_hash,
+        password: isPasswordHash(storedPassword) ? storedPassword : await ensurePasswordHash(storedPassword),
         role: row.role,
         name: row.full_name,
       });
       const token = await createSession(user);
       sendJson(res, 200, { token, user: toPublicUser(user) });
+      return;
+    }
+
+    if (pathname === '/api/auth/forgot-password' && req.method === 'POST') {
+      const body = await parseJsonBody(req);
+      const username = String(body.username || '').trim();
+      if (!username) {
+        sendError(res, 400, 'Email/username is required');
+        return;
+      }
+      if (!nodemailer || !isMailConfigured()) {
+        sendError(res, 503, 'Password reset email is not configured on the server');
+        return;
+      }
+
+      enforcePasswordResetThrottle(req, username);
+      await ensureDb();
+      const [rows] = await mysqlPool.query(
+        `SELECT id, username, full_name
+         FROM users
+         WHERE username = ?
+           AND is_active = 1
+         LIMIT 1`,
+        [username],
+      );
+      const row = Array.isArray(rows) ? rows[0] : null;
+      const genericMessage = 'If an account exists for this email, a reset link has been sent.';
+
+      if (row && String(row.username || '').includes('@')) {
+        const { token, expiresAt } = await createPasswordResetToken(row.id);
+        const resetUrl = `${getAuthBaseUrl(req)}/reset-password?token=${encodeURIComponent(token)}`;
+        const emailContent = buildPasswordResetEmail({
+          name: row.full_name || row.username,
+          resetUrl,
+          expiresAt,
+        });
+        await sendMail({
+          from: SMTP_FROM,
+          to: row.username,
+          subject: emailContent.subject,
+          text: emailContent.text,
+          html: emailContent.html,
+        });
+      }
+
+      sendJson(res, 200, { success: true, message: genericMessage });
+      return;
+    }
+
+    if (pathname === '/api/auth/reset-password' && req.method === 'POST') {
+      const body = await parseJsonBody(req);
+      const token = String(body.token || '').trim();
+      const password = String(body.password || '').trim();
+      const confirmPassword = String(body.confirmPassword || '').trim();
+      if (!token || !password) {
+        sendError(res, 400, 'Reset token and new password are required');
+        return;
+      }
+      if (password.length < 6) {
+        sendError(res, 400, 'Password must be at least 6 characters');
+        return;
+      }
+      if (confirmPassword && confirmPassword !== password) {
+        sendError(res, 400, 'Passwords do not match');
+        return;
+      }
+
+      await ensureDb();
+      const tokenHash = hashToken(token);
+      const nextPasswordHash = await hashPassword(password);
+      const conn = await mysqlPool.getConnection();
+      let userId = '';
+      try {
+        await conn.beginTransaction();
+        const [rows] = await conn.query(
+          `SELECT prt.id, prt.user_id, prt.expires_at, prt.used_at, u.is_active
+           FROM password_reset_tokens prt
+           INNER JOIN users u ON u.id = prt.user_id
+           WHERE prt.token_hash = ?
+           LIMIT 1
+           FOR UPDATE`,
+          [tokenHash],
+        );
+        const row = Array.isArray(rows) ? rows[0] : null;
+        const expiresAtMs = row?.expires_at ? new Date(row.expires_at).getTime() : 0;
+        const isValid =
+          row &&
+          Number(row.is_active || 0) === 1 &&
+          !row.used_at &&
+          Number.isFinite(expiresAtMs) &&
+          expiresAtMs > Date.now();
+        if (!isValid) {
+          await conn.rollback();
+          sendError(res, 400, 'Reset link is invalid or has expired');
+          return;
+        }
+
+        userId = String(row.user_id || '').trim();
+        await conn.query(
+          `UPDATE users
+           SET password_hash = ?
+           WHERE id = ?`,
+          [nextPasswordHash, userId],
+        );
+        await conn.query(
+          `UPDATE password_reset_tokens
+           SET used_at = CURRENT_TIMESTAMP
+           WHERE user_id = ?
+             AND used_at IS NULL`,
+          [userId],
+        );
+        await conn.commit();
+      } catch (error) {
+        try {
+          await conn.rollback();
+        } catch {
+          // ignore rollback errors
+        }
+        throw error;
+      } finally {
+        conn.release();
+      }
+
+      await revokeUserSessions(userId);
+      sendJson(res, 200, { success: true, message: 'Password updated. Return to the app and sign in.' });
       return;
     }
 
@@ -2983,7 +3611,7 @@ const server = http.createServer(async (req, res) => {
       const user = normalizeUser({
         id: `u_${crypto.randomUUID().slice(0, 8)}`,
         username,
-        password,
+        password: await hashPassword(password),
         role: 'staff',
         name: name || username,
       });
@@ -3799,7 +4427,7 @@ const server = http.createServer(async (req, res) => {
 
       const filtered = db.items.filter(item => {
         const categoryMatch = category === 'All' || item.category === category;
-        const text = `${item.name} ${item.sku} ${item.location} ${item.category} ${item.brand} ${item.capacityAh || ''}`.toLowerCase();
+        const text = `${item.name} ${item.sku} ${item.location} ${item.category} ${item.brand} ${item.capacityAh || ''} ${item.technologyOption || ''}`.toLowerCase();
         const searchMatch = !search || text.includes(search);
         return categoryMatch && searchMatch;
       });

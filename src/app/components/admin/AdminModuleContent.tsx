@@ -4,6 +4,7 @@ import { Animated, Image, Modal, Pressable, ScrollView, Text, TextInput, View } 
 import ListRow from '../ListRow';
 import Picker from '../Picker';
 import Stat from '../Stat';
+import { ITEM_CATEGORY_OPTIONS, ITEM_TECHNOLOGY_OPTIONS } from '../../constants';
 import styles from '../../styles';
 
 type Props = any;
@@ -23,6 +24,8 @@ function AdminModuleContent(props: Props) {
     setItemBrand,
     itemCategory,
     setItemCategory,
+    itemTechnologyOption,
+    setItemTechnologyOption,
     itemCapacityAh,
     setItemCapacityAh,
     itemQty,
@@ -96,17 +99,69 @@ function AdminModuleContent(props: Props) {
     movements,
   } = props;
   const ahOptions = ['110Ah', '120Ah', '150Ah', '200Ah', '220Ah'].map(cap => ({ id: cap, label: cap }));
+  const categoryOptions = React.useMemo(
+    () => ITEM_CATEGORY_OPTIONS.map(category => ({ id: category, label: category })),
+    [],
+  );
+  const technologyOptions = React.useMemo(
+    () => ITEM_TECHNOLOGY_OPTIONS.map(option => ({ id: option, label: option })),
+    [],
+  );
   const itemTagOptions = React.useMemo(() => [{ id: 'bestseller', label: 'Bestseller' }, { id: 'premium', label: 'Premium' }], []);
   const presetBrands = React.useMemo(() => ['microtek', 'sukam', 'lumious', 'exide'], []);
-  const [isBrandDropdownVisible, setIsBrandDropdownVisible] = React.useState(false);
+  const [isCreateBrandDropdownVisible, setIsCreateBrandDropdownVisible] = React.useState(false);
+  const [isEditBrandDropdownVisible, setIsEditBrandDropdownVisible] = React.useState(false);
+  const brandDropdownCloseTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const showBrandDropdown = React.useCallback(() => {
-    setIsBrandDropdownVisible(true);
+  const clearBrandDropdownCloseTimer = React.useCallback(() => {
+    if (brandDropdownCloseTimerRef.current) {
+      clearTimeout(brandDropdownCloseTimerRef.current);
+      brandDropdownCloseTimerRef.current = null;
+    }
   }, []);
 
-  const closeBrandDropdown = React.useCallback(() => {
-    setIsBrandDropdownVisible(false);
-  }, []);
+  const showBrandDropdown = React.useCallback((context: 'create' | 'edit') => {
+    clearBrandDropdownCloseTimer();
+    if (context === 'edit') {
+      setIsEditBrandDropdownVisible(true);
+      return;
+    }
+    setIsCreateBrandDropdownVisible(true);
+  }, [clearBrandDropdownCloseTimer]);
+
+  const closeBrandDropdown = React.useCallback((context: 'create' | 'edit') => {
+    clearBrandDropdownCloseTimer();
+    if (context === 'edit') {
+      setIsEditBrandDropdownVisible(false);
+      return;
+    }
+    setIsCreateBrandDropdownVisible(false);
+  }, [clearBrandDropdownCloseTimer]);
+
+  const scheduleCloseBrandDropdown = React.useCallback(
+    (context: 'create' | 'edit') => {
+      clearBrandDropdownCloseTimer();
+      brandDropdownCloseTimerRef.current = setTimeout(() => {
+        if (context === 'edit') {
+          setIsEditBrandDropdownVisible(false);
+        } else {
+          setIsCreateBrandDropdownVisible(false);
+        }
+        brandDropdownCloseTimerRef.current = null;
+      }, 120);
+    },
+    [clearBrandDropdownCloseTimer],
+  );
+
+  React.useEffect(() => {
+    if (isItemEditModalVisible) {
+      setIsCreateBrandDropdownVisible(false);
+      return;
+    }
+    setIsEditBrandDropdownVisible(false);
+  }, [isItemEditModalVisible]);
+
+  React.useEffect(() => () => clearBrandDropdownCloseTimer(), [clearBrandDropdownCloseTimer]);
 
   const toBrandLabel = React.useCallback((value: string) => {
     const lower = value.toLowerCase();
@@ -136,23 +191,23 @@ function AdminModuleContent(props: Props) {
   }, [brandOptions, itemBrand]);
 
   const handleBrandInputChange = React.useCallback(
-    (value: string) => {
+    (context: 'create' | 'edit', value: string) => {
       setItemBrand(value);
-      setIsBrandDropdownVisible(true);
+      showBrandDropdown(context);
     },
-    [setItemBrand],
+    [setItemBrand, showBrandDropdown],
   );
 
   const handleBrandSelect = React.useCallback(
-    (brand: string) => {
+    (context: 'create' | 'edit', brand: string) => {
       setItemBrand(brand);
-      closeBrandDropdown();
+      closeBrandDropdown(context);
     },
     [closeBrandDropdown, setItemBrand],
   );
 
-  const enableManualBrandEntry = React.useCallback(() => {
-    closeBrandDropdown();
+  const enableManualBrandEntry = React.useCallback((context: 'create' | 'edit') => {
+    closeBrandDropdown(context);
     setItemBrand('');
   }, [closeBrandDropdown, setItemBrand]);
 
@@ -232,33 +287,51 @@ function AdminModuleContent(props: Props) {
             <View style={styles.brandInputWrap}>
               <TextInput
                 value={itemBrand}
-                onChangeText={handleBrandInputChange}
-                onFocus={showBrandDropdown}
-                onPressIn={showBrandDropdown}
+                onChangeText={value => handleBrandInputChange('create', value)}
+                onFocus={() => showBrandDropdown('create')}
+                onPressIn={() => showBrandDropdown('create')}
+                onBlur={() => scheduleCloseBrandDropdown('create')}
                 placeholder="Brand"
                 placeholderTextColor={theme.subtext}
                 style={[styles.input, { color: theme.text, backgroundColor: theme.steel }]}
               />
-              {isBrandDropdownVisible ? (
-                <View style={[styles.brandDropdown, { backgroundColor: theme.panel, borderColor: theme.steel }]}>
+              {isCreateBrandDropdownVisible ? (
+                <ScrollView
+                  style={[styles.brandDropdown, { backgroundColor: theme.panel, borderColor: theme.steel }]}
+                  nestedScrollEnabled
+                  keyboardShouldPersistTaps="handled"
+                  showsVerticalScrollIndicator
+                >
                   {(filteredBrandOptions.length > 0 ? filteredBrandOptions : brandOptions).map(brand => (
                     <Pressable
                       key={`brand_${brand.toLowerCase().replace(/[^a-z0-9]+/g, '_')}`}
                       style={styles.brandDropdownItem}
-                      onPress={() => handleBrandSelect(brand)}
+                      onPress={() => handleBrandSelect('create', brand)}
                     >
                       <Text style={[styles.brandDropdownText, { color: theme.text }]}>{brand}</Text>
                     </Pressable>
                   ))}
                   <View style={[styles.brandDropdownDivider, { backgroundColor: theme.steel }]} />
-                  <Pressable style={[styles.brandDropdownItem, styles.brandDropdownItemLast]} onPress={enableManualBrandEntry}>
+                  <Pressable style={[styles.brandDropdownItem, styles.brandDropdownItemLast]} onPress={() => enableManualBrandEntry('create')}>
                     <Text style={styles.brandDropdownManualText}>+ Manual Entry</Text>
                   </Pressable>
-                </View>
+                </ScrollView>
               ) : null}
             </View>
-            <Text style={[styles.small, styles.fieldLabel, { color: theme.subtext }]}>Category</Text>
-            <TextInput value={itemCategory} onChangeText={setItemCategory} placeholder="Category" placeholderTextColor={theme.subtext} style={[styles.input, { color: theme.text, backgroundColor: theme.steel }]} />
+            <Picker
+              label="Category"
+              selectedId={itemCategory}
+              options={categoryOptions}
+              onSelect={setItemCategory}
+              theme={theme}
+            />
+            <Picker
+              label="Technology"
+              selectedId={itemTechnologyOption}
+              options={technologyOptions}
+              onSelect={setItemTechnologyOption}
+              theme={theme}
+            />
             <Picker
               label="Capacity (Ah)"
               selectedId={itemCapacityAh}
@@ -366,11 +439,14 @@ function AdminModuleContent(props: Props) {
           <TextInput value={search} onChangeText={setSearch} placeholder="Search items" placeholderTextColor={theme.subtext} style={[styles.input, { color: theme.text, backgroundColor: theme.panelSoft }]} />
           {filteredItems.map((item: any) => {
             const statusColor = item.status === 'In Stock' ? theme.accent : item.status === 'Low Stock' ? theme.warning : theme.danger;
+            const itemSummary = [item.brand || '—', item.category, item.technologyOption, item.capacityAh || '150Ah', `Qty ${item.qty}`]
+              .filter(Boolean)
+              .join(' • ');
             return (
               <View key={item.id} style={[styles.rowCard, { backgroundColor: theme.panelSoft }]}>
                 <View style={{ flex: 1 }}>
                   <Text style={[styles.itemText, { color: theme.text }]}>{`${item.name} (${item.sku})`}</Text>
-                  <Text style={[styles.small, { color: theme.subtext }]}>{`${item.brand || '—'} • ${item.category} • ${item.capacityAh || '150Ah'} • Qty ${item.qty}`}</Text>
+                  <Text style={[styles.small, { color: theme.subtext }]}>{itemSummary}</Text>
                 </View>
                 <Text style={[styles.itemText, { color: statusColor }]}>{item.status}</Text>
                 <Pressable
@@ -417,38 +493,50 @@ function AdminModuleContent(props: Props) {
                   <View style={styles.brandInputWrap}>
                     <TextInput
                       value={itemBrand}
-                      onChangeText={handleBrandInputChange}
-                      onFocus={showBrandDropdown}
-                      onPressIn={showBrandDropdown}
+                      onChangeText={value => handleBrandInputChange('edit', value)}
+                      onFocus={() => showBrandDropdown('edit')}
+                      onPressIn={() => showBrandDropdown('edit')}
+                      onBlur={() => scheduleCloseBrandDropdown('edit')}
                       placeholder="Brand"
                       placeholderTextColor={theme.subtext}
                       style={[styles.input, { color: theme.text, backgroundColor: theme.steel }]}
                     />
-                    {isBrandDropdownVisible ? (
-                      <View style={[styles.brandDropdown, { backgroundColor: theme.panel, borderColor: theme.steel }]}>
+                    {isEditBrandDropdownVisible ? (
+                      <ScrollView
+                        style={[styles.brandDropdown, { backgroundColor: theme.panel, borderColor: theme.steel }]}
+                        nestedScrollEnabled
+                        keyboardShouldPersistTaps="handled"
+                        showsVerticalScrollIndicator
+                      >
                         {(filteredBrandOptions.length > 0 ? filteredBrandOptions : brandOptions).map(brand => (
                           <Pressable
                             key={`brand_modal_${brand.toLowerCase().replace(/[^a-z0-9]+/g, '_')}`}
                             style={styles.brandDropdownItem}
-                            onPress={() => handleBrandSelect(brand)}
+                            onPress={() => handleBrandSelect('edit', brand)}
                           >
                             <Text style={[styles.brandDropdownText, { color: theme.text }]}>{brand}</Text>
                           </Pressable>
                         ))}
                         <View style={[styles.brandDropdownDivider, { backgroundColor: theme.steel }]} />
-                        <Pressable style={[styles.brandDropdownItem, styles.brandDropdownItemLast]} onPress={enableManualBrandEntry}>
+                        <Pressable style={[styles.brandDropdownItem, styles.brandDropdownItemLast]} onPress={() => enableManualBrandEntry('edit')}>
                           <Text style={styles.brandDropdownManualText}>+ Manual Entry</Text>
                         </Pressable>
-                      </View>
+                      </ScrollView>
                     ) : null}
                   </View>
-                  <Text style={[styles.small, styles.fieldLabel, { color: theme.subtext }]}>Category</Text>
-                  <TextInput
-                    value={itemCategory}
-                    onChangeText={setItemCategory}
-                    placeholder="Category"
-                    placeholderTextColor={theme.subtext}
-                    style={[styles.input, { color: theme.text, backgroundColor: theme.steel }]}
+                  <Picker
+                    label="Category"
+                    selectedId={itemCategory}
+                    options={categoryOptions}
+                    onSelect={setItemCategory}
+                    theme={theme}
+                  />
+                  <Picker
+                    label="Technology"
+                    selectedId={itemTechnologyOption}
+                    options={technologyOptions}
+                    onSelect={setItemTechnologyOption}
+                    theme={theme}
                   />
                   <Picker
                     label="Capacity (Ah)"

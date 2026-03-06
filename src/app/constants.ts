@@ -1,6 +1,6 @@
 import { Platform } from 'react-native';
 
-import type { ModuleId, Theme } from './types';
+import type { ItemTechnologyOption, ModuleId, Theme } from './types';
 
 export const theme: Theme = {
   bg: '#F5F7F3',
@@ -38,6 +38,10 @@ export const API_BASE = Platform.select({
 export const APP_CURRENT_VERSION = '1.0.0';
 export const APP_UPDATE_APP_ID = 'com.mobile';
 export const APP_UPDATE_CHANNEL = 'production';
+export const ITEM_CATEGORY_OPTIONS = ['Battery', 'Inverter', 'Miscellaneous'];
+export const DEFAULT_ITEM_CATEGORY = 'Inverter';
+export const ITEM_TECHNOLOGY_OPTIONS: ItemTechnologyOption[] = ['Sinewave', 'Eco Watt', 'Advanced Digital'];
+export const DEFAULT_ITEM_TECHNOLOGY: ItemTechnologyOption = 'Sinewave';
 
 export const LANDING_HERO_IMAGE = require('../assets/images/land-page-bg.png');
 export const APP_LOGO_IMAGE = require('../assets/images/icon.png');

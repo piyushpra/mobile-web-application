@@ -39,6 +39,22 @@ CREATE TABLE IF NOT EXISTS user_sessions (
     ON UPDATE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+CREATE TABLE IF NOT EXISTS password_reset_tokens (
+  id VARCHAR(64) NOT NULL,
+  user_id VARCHAR(64) NOT NULL,
+  token_hash CHAR(64) NOT NULL,
+  expires_at DATETIME NOT NULL,
+  used_at DATETIME NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (id),
+  UNIQUE KEY uq_password_reset_tokens_token_hash (token_hash),
+  KEY idx_password_reset_tokens_user_expires (user_id, expires_at),
+  CONSTRAINT fk_password_reset_tokens_user
+    FOREIGN KEY (user_id) REFERENCES users(id)
+    ON DELETE CASCADE
+    ON UPDATE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 CREATE TABLE IF NOT EXISTS user_preferences (
   user_id VARCHAR(64) NOT NULL,
   dark_mode TINYINT(1) NOT NULL DEFAULT 0,
@@ -71,8 +87,9 @@ CREATE TABLE IF NOT EXISTS products (
   name VARCHAR(200) NOT NULL,
   model VARCHAR(120) NULL,
   capacity_ah VARCHAR(20) NULL,
+  technology_option VARCHAR(40) NULL,
   sku VARCHAR(120) NOT NULL,
-  category VARCHAR(80) NOT NULL DEFAULT 'Misc',
+  category VARCHAR(80) NOT NULL DEFAULT 'Miscellaneous',
   unit VARCHAR(20) NOT NULL DEFAULT 'pcs',
   brand VARCHAR(80) NULL,
   tags VARCHAR(255) NULL,

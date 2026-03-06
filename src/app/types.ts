@@ -1,4 +1,5 @@
 export type Role = 'admin' | 'manager' | 'staff';
+export type ItemTechnologyOption = 'Sinewave' | 'Eco Watt' | 'Advanced Digital';
 
 export type ModuleId =
   | 'home'
@@ -12,7 +13,7 @@ export type ModuleId =
   | 'invoices'
   | 'stock';
 
-export type AuthMode = 'none' | 'login' | 'register';
+export type AuthMode = 'none' | 'login' | 'register' | 'forgot';
 export type PublicView = 'landing' | 'categories' | 'categoryProducts' | 'list' | 'auth' | 'cart' | 'feedback';
 export type LandingCategory = 'inverters' | 'batteries' | 'accessories';
 export type ViewMoreContext = 'category' | 'featured' | 'all';
@@ -41,6 +42,7 @@ export type Item = {
   images?: string[];
   tags?: string[];
   capacityAh?: string;
+  technologyOption?: ItemTechnologyOption;
   category: string;
   unit: string;
   brand: string;
@@ -68,6 +70,7 @@ export type PublicProduct = {
   model: string;
   brand: string;
   category: string;
+  technologyOption?: ItemTechnologyOption;
   tags?: string[];
   shortDescription: string;
   thumbnail: string;
@@ -106,6 +109,7 @@ export type PublicProductDetail = {
   model: string;
   brand: string;
   category: string;
+  technologyOption?: ItemTechnologyOption;
   tags?: string[];
   description: string;
   images: string[];

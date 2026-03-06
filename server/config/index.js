@@ -73,6 +73,17 @@ function parseNumber(value, fallback) {
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
+function parseBool(value, fallback = false) {
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'number') return value !== 0;
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase();
+    if (['1', 'true', 'yes', 'on'].includes(normalized)) return true;
+    if (['0', 'false', 'no', 'off'].includes(normalized)) return false;
+  }
+  return fallback;
+}
+
 const lockedEnvKeys = new Set(Object.keys(process.env));
 const loadedFiles = [];
 
@@ -89,6 +100,7 @@ if (loadEnvFile(envFilePath, lockedEnvKeys, true)) {
 
 const config = {
   appEnv,
+  appName: String(process.env.APP_NAME || 'Mobile Application').trim() || 'Mobile Application',
   rootDir: ROOT_DIR,
   configDir: CONFIG_DIR,
   loadedFiles,
@@ -105,6 +117,19 @@ const config = {
   uploads: {
     maxItemUploadCount: parseNumber(process.env.MAX_ITEM_UPLOAD_COUNT, 5),
     maxItemUploadBytes: parseNumber(process.env.MAX_ITEM_UPLOAD_BYTES, 5 * 1024 * 1024),
+  },
+  auth: {
+    publicBaseUrl: String(process.env.AUTH_PUBLIC_BASE_URL || process.env.APP_PUBLIC_URL || '').trim(),
+    resetTokenTtlMs: parseNumber(process.env.AUTH_RESET_TOKEN_TTL_MS, 15 * 60 * 1000),
+    resetRequestCooldownMs: parseNumber(process.env.AUTH_RESET_REQUEST_COOLDOWN_MS, 60 * 1000),
+  },
+  mail: {
+    host: String(process.env.SMTP_HOST || '').trim(),
+    port: parseNumber(process.env.SMTP_PORT, 587),
+    secure: parseBool(process.env.SMTP_SECURE, false),
+    user: String(process.env.SMTP_USER || '').trim(),
+    password: String(process.env.SMTP_PASSWORD || ''),
+    from: String(process.env.SMTP_FROM || '').trim(),
   },
   appUpdateManifestCacheMs: parseNumber(process.env.APP_UPDATE_MANIFEST_CACHE_MS, 15 * 1000),
 };

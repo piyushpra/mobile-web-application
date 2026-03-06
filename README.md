@@ -130,6 +130,47 @@ If your PM2 process name matches the folder name, the restart command would be:
 EC2_HOST=<your-ec2-host> ./scripts/ec2-run.sh pm2 restart mobile-web-application
 ```
 
+## Forgot Password Email Reset
+
+The backend now supports a standard reset-link flow:
+
+- `POST /api/auth/forgot-password` accepts `{ "username": "<email>" }`
+- the server generates a one-time reset token, stores only its SHA-256 hash, and emails the reset link
+- `GET /reset-password?token=...` serves the password reset page
+- `POST /api/auth/reset-password` accepts `{ "token": "...", "password": "...", "confirmPassword": "..." }`
+- all active sessions for that user are revoked after a successful reset
+
+Required config in [config/production.env](/Users/piyush/Downloads/my-personal-application/mobile/config/production.env) and [config/local.env](/Users/piyush/Downloads/my-personal-application/mobile/config/local.env):
+
+```sh
+APP_NAME=Mobile Application
+AUTH_PUBLIC_BASE_URL=http://13.235.49.124
+AUTH_RESET_TOKEN_TTL_MS=900000
+AUTH_RESET_REQUEST_COOLDOWN_MS=60000
+
+SMTP_HOST=smtp.example.com
+SMTP_PORT=587
+SMTP_SECURE=false
+SMTP_USER=apikey-or-username
+SMTP_PASSWORD=change-production-smtp-password
+SMTP_FROM=Mobile Application <no-reply@example.com>
+```
+
+Mail notes:
+
+- `AUTH_PUBLIC_BASE_URL` must point to the public backend host that can serve `/reset-password`
+- `SMTP_FROM` should be a valid sender on your SMTP provider
+- if you use Gmail, SendGrid, Mailgun, Brevo, SES, or similar, use their SMTP credentials here
+- if `SMTP_SECURE=true`, use the TLS port your provider expects, usually `465`
+
+After updating config on EC2:
+
+```sh
+cd /opt/mobile/mobile-web-application
+npm install
+APP_ENV=production pm2 restart mobile-api --update-env
+```
+
 ## Android Self Update
 
 The Android app already checks `GET /api/public/app-update` on startup and shows an update popup when a newer version is available.

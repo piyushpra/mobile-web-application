@@ -31,6 +31,8 @@ import {
   APP_CURRENT_VERSION,
   APP_UPDATE_APP_ID,
   APP_UPDATE_CHANNEL,
+  DEFAULT_ITEM_CATEGORY,
+  DEFAULT_ITEM_TECHNOLOGY,
   FOOTER_LOGO_IMAGE,
   FUELECTRIC_LOGO_IMAGE,
   LANDING_HERO_IMAGE,
@@ -47,6 +49,7 @@ import type {
   Doc,
   FeedbackOrderItem,
   Item,
+  ItemTechnologyOption,
   LandingCategory,
   ModuleId,
   Movement,
@@ -96,6 +99,10 @@ type NativePickerImage = {
   base64Data?: string;
 };
 
+type ApiRequestOptions = RequestInit & {
+  skipAuth?: boolean;
+};
+
 const MAX_ITEM_IMAGES = 5;
 const AUTH_TOKEN_STORAGE_KEY = '@mobile/auth_token';
 const AUTH_USER_STORAGE_KEY = '@mobile/auth_user';
@@ -139,6 +146,14 @@ function compareVersionStrings(left: string, right: string) {
   return 0;
 }
 
+function toFeatureChipLabel(value: string) {
+  const normalized = String(value || '').trim().replace(/[_-]+/g, ' ').replace(/\s+/g, ' ');
+  if (!normalized) {
+    return '';
+  }
+  return normalized.toLowerCase().replace(/\b[a-z]/g, match => match.toUpperCase());
+}
+
 function toFetchError(url: string, err: unknown, fallback = 'Request failed') {
   const message = err instanceof Error ? err.message : fallback;
   return new Error(`${message} [${url}]`);
@@ -167,12 +182,13 @@ function MainApp() {
   const [error, setError] = useState<string | null>(null);
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
 
-  const [username, setUsername] = useState('admin');
-  const [password, setPassword] = useState('admin123');
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
   const [registerName, setRegisterName] = useState('');
   const [registerUsername, setRegisterUsername] = useState('');
   const [registerPhone, setRegisterPhone] = useState('');
   const [registerPassword, setRegisterPassword] = useState('');
+  const [forgotUsername, setForgotUsername] = useState('');
   const [authMode, setAuthMode] = useState<AuthMode>('none');
   const [isAuthModalVisible, setIsAuthModalVisible] = useState(false);
   const [publicView, setPublicView] = useState<PublicView>('landing');
@@ -266,7 +282,8 @@ function MainApp() {
   const [itemName, setItemName] = useState('');
   const [itemSku, setItemSku] = useState('');
   const [itemBrand, setItemBrand] = useState('');
-  const [itemCategory, setItemCategory] = useState('Power Backup');
+  const [itemCategory, setItemCategory] = useState(DEFAULT_ITEM_CATEGORY);
+  const [itemTechnologyOption, setItemTechnologyOption] = useState<ItemTechnologyOption | ''>(DEFAULT_ITEM_TECHNOLOGY);
   const [itemCapacityAh, setItemCapacityAh] = useState('150Ah');
   const [itemQty, setItemQty] = useState('1');
   const [itemReorder, setItemReorder] = useState('8');
@@ -296,6 +313,7 @@ function MainApp() {
   const [adjustDelta, setAdjustDelta] = useState('1');
   const [adjustReason, setAdjustReason] = useState('Manual adjustment');
   const theme = profileDarkMode ? darkTheme : lightTheme;
+  const isDarkMode = theme.bg === darkTheme.bg;
   const appBrandLogo = profileDarkMode ? FOOTER_LOGO_IMAGE : FUELECTRIC_LOGO_IMAGE;
 
   const fade = useRef(new Animated.Value(0)).current;
@@ -412,14 +430,14 @@ function MainApp() {
     return json as T;
   };
 
-  const apiRequest = async <T,>(path: string, init?: RequestInit): Promise<T> => {
+  const apiRequest = async <T,>(path: string, init?: ApiRequestOptions): Promise<T> => {
     const runRequest = async (authToken: string | null) => {
       const url = `${API_BASE}${path}`;
       const headers: Record<string, string> = {
         'Content-Type': 'application/json',
         ...(init?.headers as Record<string, string> | undefined),
       };
-      if (authToken) {
+      if (authToken && !init?.skipAuth) {
         headers.Authorization = `Bearer ${authToken}`;
       }
       let response: Response;
@@ -436,7 +454,7 @@ function MainApp() {
     };
 
     let { response, json } = await runRequest(token);
-    if (response.status === 401 && token) {
+    if (response.status === 401 && token && !init?.skipAuth) {
       setToken(null);
       setUser(null);
       void clearSavedAuthSession();
@@ -602,23 +620,26 @@ function MainApp() {
     }
   };
 
-  const openAuthModal = (mode: 'login' | 'register') => {
+  const getAuthSlideOffset = (mode: AuthMode) => (mode === 'register' ? -18 : 18);
+
+  const openAuthModal = (mode: 'login' | 'register' | 'forgot') => {
     setAuthMode(mode);
     authFormOpacity.setValue(1);
     authFormSlide.setValue(0);
     setIsAuthModalVisible(true);
   };
 
-  const switchAuthMode = (mode: 'login' | 'register') => {
+  const switchAuthMode = (mode: 'login' | 'register' | 'forgot') => {
     if (authMode === mode) {
       return;
     }
+    const nextSlideOffset = getAuthSlideOffset(mode);
     Animated.parallel([
       Animated.timing(authFormOpacity, { toValue: 0, duration: 120, easing: Easing.out(Easing.cubic), useNativeDriver: true }),
-      Animated.timing(authFormSlide, { toValue: mode === 'register' ? -18 : 18, duration: 120, easing: Easing.out(Easing.cubic), useNativeDriver: true }),
+      Animated.timing(authFormSlide, { toValue: nextSlideOffset, duration: 120, easing: Easing.out(Easing.cubic), useNativeDriver: true }),
     ]).start(() => {
       setAuthMode(mode);
-      authFormSlide.setValue(mode === 'register' ? 18 : -18);
+      authFormSlide.setValue(-nextSlideOffset);
       Animated.parallel([
         Animated.timing(authFormOpacity, { toValue: 1, duration: 180, easing: Easing.out(Easing.cubic), useNativeDriver: true }),
         Animated.timing(authFormSlide, { toValue: 0, duration: 180, easing: Easing.out(Easing.cubic), useNativeDriver: true }),
@@ -1246,6 +1267,7 @@ function MainApp() {
           model: item.sku,
           brand: '',
           category: item.category,
+          technologyOption: undefined,
           tags: [],
           shortDescription: `${item.category} product`,
           thumbnail: 'https://dummyimage.com/900x600/1f2937/f9fafb.png&text=Product',
@@ -2011,6 +2033,7 @@ function MainApp() {
       const res = await apiRequest<{ token: string; user: User }>('/api/auth/login', {
         method: 'POST',
         body: JSON.stringify({ username, password }),
+        skipAuth: true,
       });
       setToken(res.token);
       setUser(res.user);
@@ -2053,6 +2076,7 @@ function MainApp() {
           phone: registerPhone.trim(),
           password: registerPassword.trim(),
         }),
+        skipAuth: true,
       });
       showToast('Registration successful');
       setUsername(registerUsername.trim());
@@ -2064,6 +2088,30 @@ function MainApp() {
       switchAuthMode('login');
     } catch (err) {
       showActionError('Registration Failed', err, 'Registration failed');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const requestPasswordReset = async () => {
+    if (!forgotUsername.trim()) {
+      Alert.alert('Validation', 'Email address is required.');
+      return;
+    }
+    try {
+      setIsLoading(true);
+      setError(null);
+      const res = await apiRequest<{ message?: string }>('/api/auth/forgot-password', {
+        method: 'POST',
+        body: JSON.stringify({ username: forgotUsername.trim() }),
+        skipAuth: true,
+      });
+      setUsername(forgotUsername.trim());
+      setForgotUsername('');
+      showToast(res.message || 'If an account exists, a reset link has been sent.');
+      switchAuthMode('login');
+    } catch (err) {
+      showActionError('Reset Email Failed', err, 'Unable to send password reset email');
     } finally {
       setIsLoading(false);
     }
@@ -2190,7 +2238,8 @@ function MainApp() {
     setItemName('');
     setItemSku('');
     setItemBrand('');
-    setItemCategory('Power Backup');
+    setItemCategory(DEFAULT_ITEM_CATEGORY);
+    setItemTechnologyOption(DEFAULT_ITEM_TECHNOLOGY);
     setItemCapacityAh('150Ah');
     setItemQty('1');
     setItemReorder('8');
@@ -2211,7 +2260,8 @@ function MainApp() {
     setItemName(target.name || '');
     setItemSku(target.sku || '');
     setItemBrand(target.brand || '');
-    setItemCategory(target.category || 'Power Backup');
+    setItemCategory(target.category || DEFAULT_ITEM_CATEGORY);
+    setItemTechnologyOption(target.technologyOption || '');
     setItemCapacityAh(target.capacityAh || '150Ah');
     setItemQty(String(target.qty || 0));
     setItemReorder(String(target.reorderPoint || 0));
@@ -2273,6 +2323,7 @@ function MainApp() {
           sku: itemSku.trim(),
           brand: itemBrand.trim(),
           category: itemCategory.trim(),
+          technologyOption: itemTechnologyOption || undefined,
           capacityAh: itemCapacityAh,
           qty: Number(itemQty || 0),
           reorderPoint: Number(itemReorder || 0),
@@ -2455,27 +2506,35 @@ function MainApp() {
 
   const filteredItems = useMemo(() => {
     const q = search.toLowerCase().trim();
-    return items.filter(item => !q || `${item.name} ${item.sku} ${item.category} ${item.brand}`.toLowerCase().includes(q));
+    return items.filter(
+      item =>
+        !q ||
+        `${item.name} ${item.sku} ${item.category} ${item.brand} ${item.technologyOption || ''}`.toLowerCase().includes(q),
+    );
   }, [items, search]);
   const featuredPublic = useMemo(() => publicStock.slice(0, 2), [publicStock]);
   const inverterProducts = useMemo(
     () =>
       publicProducts.filter(product =>
-        `${product.name} ${product.model} ${product.brand} ${product.category}`.toLowerCase().includes('inverter'),
+        `${product.name} ${product.model} ${product.brand} ${product.category} ${product.technologyOption || ''}`
+          .toLowerCase()
+          .includes('inverter'),
       ),
     [publicProducts],
   );
   const batteryProducts = useMemo(
     () =>
       publicProducts.filter(product =>
-        `${product.name} ${product.model} ${product.brand} ${product.category}`.toLowerCase().includes('battery'),
+        `${product.name} ${product.model} ${product.brand} ${product.category} ${product.technologyOption || ''}`
+          .toLowerCase()
+          .includes('battery'),
       ),
     [publicProducts],
   );
   const accessoryProducts = useMemo(
     () =>
       publicProducts.filter(product => {
-        const t = `${product.name} ${product.model} ${product.brand} ${product.category}`.toLowerCase();
+        const t = `${product.name} ${product.model} ${product.brand} ${product.category} ${product.technologyOption || ''}`.toLowerCase();
         return !t.includes('inverter') && !t.includes('battery');
       }),
     [publicProducts],
@@ -2495,7 +2554,9 @@ function MainApp() {
       return landingProducts;
     }
     return landingProducts.filter(product =>
-      `${product.name} ${product.model} ${product.brand} ${product.category} ${product.shortDescription}`.toLowerCase().includes(q),
+      `${product.name} ${product.model} ${product.brand} ${product.category} ${product.technologyOption || ''} ${product.shortDescription}`
+        .toLowerCase()
+        .includes(q),
     );
   }, [landingProducts, publicSearch]);
   const searchedPublicProducts = useMemo(() => {
@@ -2504,7 +2565,9 @@ function MainApp() {
       return publicProducts;
     }
     return publicProducts.filter(product =>
-      `${product.name} ${product.model} ${product.brand} ${product.category} ${product.shortDescription}`.toLowerCase().includes(q),
+      `${product.name} ${product.model} ${product.brand} ${product.category} ${product.technologyOption || ''} ${product.shortDescription}`
+        .toLowerCase()
+        .includes(q),
     );
   }, [publicProducts, publicSearch]);
   const featuredLandingProducts = useMemo(() => {
@@ -2581,6 +2644,72 @@ function MainApp() {
   );
   const isSelectedProductBestseller = selectedProductTags.includes('bestseller');
   const isSelectedProductPremium = selectedProductTags.includes('premium');
+  const selectedProductFeatureChips = useMemo(
+    () => [
+      { icon: '≈', label: toFeatureChipLabel(selectedProduct?.technologyOption || 'Pure Sine Wave') },
+      { icon: '⌗', label: 'LED Display' },
+      { icon: '⏱', label: '24x7 Support' },
+    ],
+    [selectedProduct?.technologyOption],
+  );
+  const detailPageStyles = useMemo(
+    () => ({
+      heroOverlay: { backgroundColor: isDarkMode ? 'rgba(2, 6, 23, 0.42)' : 'rgba(16, 50, 28, 0.20)' },
+      circleBtn: {
+        backgroundColor: isDarkMode ? 'rgba(15, 23, 42, 0.88)' : 'rgba(255,255,255,0.93)',
+        borderWidth: 1,
+        borderColor: isDarkMode ? '#334155' : 'rgba(255,255,255,0.65)',
+      },
+      circleIcon: { color: isDarkMode ? '#F8FAFC' : '#111827' },
+      bestsellerTag: { backgroundColor: isDarkMode ? '#3F3414' : '#F4E6A7' },
+      bestsellerTagText: { color: isDarkMode ? '#FDE68A' : '#7C5C06' },
+      premiumPill: { backgroundColor: isDarkMode ? '#3F3414' : '#EEDC98' },
+      premiumPillText: { color: isDarkMode ? '#FDE68A' : '#8A6510' },
+      detailMrp: { color: theme.subtext },
+      discountPill: {
+        backgroundColor: isDarkMode ? '#153929' : '#D9F5E2',
+        borderWidth: 1,
+        borderColor: isDarkMode ? '#1F6A53' : '#C1E8CF',
+      },
+      discountPillText: { color: isDarkMode ? '#86EFAC' : '#16794A' },
+      featureChip: {
+        backgroundColor: isDarkMode ? theme.steel : '#F3F4F6',
+        borderColor: isDarkMode ? '#475569' : '#E5E7EB',
+      },
+      featureIcon: { color: isDarkMode ? theme.accent : '#225C3D' },
+      featureText: { color: isDarkMode ? theme.text : '#1F2937' },
+      capacityBtn: {
+        borderColor: isDarkMode ? '#475569' : '#D1D5DB',
+        backgroundColor: isDarkMode ? theme.panelSoft : '#FFFFFF',
+      },
+      capacityBtnActive: {
+        borderColor: isDarkMode ? theme.primary : '#2E7D32',
+        backgroundColor: isDarkMode ? theme.primary : '#F0FDF4',
+      },
+      capacityBtnDisabled: {
+        borderColor: isDarkMode ? '#334155' : '#E5E7EB',
+        backgroundColor: isDarkMode ? '#0F172A' : '#F9FAFB',
+        opacity: isDarkMode ? 0.55 : 0.65,
+      },
+      capacityText: { color: isDarkMode ? theme.text : '#374151' },
+      capacityTextDisabled: { color: theme.subtext },
+      capacityTextActive: { color: isDarkMode ? '#FFFFFF' : '#14532D' },
+      capacityHint: { color: theme.subtext },
+      inCartText: { color: isDarkMode ? '#86EFAC' : '#166534' },
+      cartHint: { color: theme.subtext },
+      addCartBtn: {
+        borderColor: isDarkMode ? '#475569' : '#9CA3AF',
+        backgroundColor: isDarkMode ? theme.panelSoft : '#FFFFFF',
+      },
+      addCartBtnAdded: {
+        borderColor: isDarkMode ? theme.accent : '#2E7D32',
+        backgroundColor: isDarkMode ? '#153929' : '#ECFDF3',
+      },
+      addCartText: { color: isDarkMode ? theme.text : '#111827' },
+      buyNowBtn: { backgroundColor: isDarkMode ? theme.primary : '#2E8B1A' },
+    }),
+    [isDarkMode, theme],
+  );
   const isSelectedCapacityAvailable = useMemo(
     () => selectedProductAvailableCapacities.includes(selectedCapacity),
     [selectedProductAvailableCapacities, selectedCapacity],
@@ -3283,8 +3412,16 @@ function MainApp() {
                   },
                 ]}
               >
-                <Text style={[styles.authTitle, { color: theme.text }]}>{authMode === 'register' ? 'Create an Account' : 'Welcome Back!'}</Text>
-                <Text style={[styles.authSubtitle, { color: theme.subtext }]}>{authMode === 'register' ? 'Register to get started' : 'Login to your account'}</Text>
+                <Text style={[styles.authTitle, { color: theme.text }]}>
+                  {authMode === 'register' ? 'Create an Account' : authMode === 'forgot' ? 'Reset Password' : 'Welcome Back!'}
+                </Text>
+                <Text style={[styles.authSubtitle, { color: theme.subtext }]}>
+                  {authMode === 'register'
+                    ? 'Register to get started'
+                    : authMode === 'forgot'
+                      ? 'Enter your email and we will send you a reset link'
+                      : 'Login to your account'}
+                </Text>
 
                 {authMode === 'register' ? (
                   <>
@@ -3361,6 +3498,39 @@ function MainApp() {
                       <Text style={styles.authSocialTextFb}>Sign up with Facebook</Text>
                     </Pressable>
                   </>
+                ) : authMode === 'forgot' ? (
+                  <>
+                    <View style={styles.authInputWrap}>
+                      <Text style={styles.authInputIcon}>✉</Text>
+                      <TextInput
+                        value={forgotUsername}
+                        onChangeText={setForgotUsername}
+                        placeholder="Email Address"
+                        placeholderTextColor="#6B7280"
+                        style={styles.authInputField}
+                        autoCapitalize="none"
+                        keyboardType="email-address"
+                      />
+                    </View>
+                    <Text style={[styles.authHint, { color: theme.subtext }]}>
+                      We will send a one-time reset link to this email address.
+                    </Text>
+                    <Pressable style={styles.authPrimaryBtn} onPress={requestPasswordReset} disabled={isLoading}>
+                      <Text style={styles.authPrimaryText}>{isLoading ? 'Sending...' : 'Send Reset Link'}</Text>
+                    </Pressable>
+                    <View style={styles.authSwitchRow}>
+                      <Text style={[styles.authSwitchText, { color: theme.subtext }]}>
+                        Remembered your password?{' '}
+                        <Text
+                          style={[styles.authSwitchLink, { color: theme.accent }]}
+                          accessibilityRole="button"
+                          onPress={() => switchAuthMode('login')}
+                        >
+                          Back to Login
+                        </Text>
+                      </Text>
+                    </View>
+                  </>
                 ) : (
                   <>
                     <View style={styles.authInputWrap}>
@@ -3388,7 +3558,10 @@ function MainApp() {
                     <Text
                       style={[styles.authForgot, { color: theme.accent, alignSelf: 'flex-end' }]}
                       accessibilityRole="button"
-                      onPress={() => Alert.alert('Forgot Password', 'Password recovery flow will be added soon.')}
+                      onPress={() => {
+                        setForgotUsername(username.trim());
+                        switchAuthMode('forgot');
+                      }}
                     >
                       Forgot Password?
                     </Text>
@@ -3579,31 +3752,31 @@ function MainApp() {
                         style={styles.detailHeroImage}
                         resizeMode="cover"
                       />
-                      <View style={styles.detailHeroOverlay} />
+                      <View style={[styles.detailHeroOverlay, detailPageStyles.heroOverlay]} />
                       <View style={styles.detailTopActions}>
-                        <Pressable style={styles.detailCircleBtn} onPress={() => setIsDetailModalVisible(false)}>
-                          <Text style={styles.detailCircleIcon}>←</Text>
+                        <Pressable style={[styles.detailCircleBtn, detailPageStyles.circleBtn]} onPress={() => setIsDetailModalVisible(false)}>
+                          <Text style={[styles.detailCircleIcon, detailPageStyles.circleIcon]}>←</Text>
                         </Pressable>
                         <View style={{ flexDirection: 'row', gap: 8 }}>
-                          <Pressable style={styles.detailCircleBtn}>
-                            <Text style={styles.detailCircleIcon}>⌕</Text>
+                          <Pressable style={[styles.detailCircleBtn, detailPageStyles.circleBtn]}>
+                            <Text style={[styles.detailCircleIcon, detailPageStyles.circleIcon]}>⌕</Text>
                           </Pressable>
                           <Pressable
-                            style={styles.detailCircleBtn}
+                            style={[styles.detailCircleBtn, detailPageStyles.circleBtn]}
                             onPress={() => {
                               if (!selectedProduct) return;
                               toggleWishlist(selectedProduct.id);
                             }}
                           >
-                            <Text style={[styles.detailCircleIcon, isSelectedProductWishlisted && { color: theme.accent }]}>
+                            <Text style={[styles.detailCircleIcon, detailPageStyles.circleIcon, isSelectedProductWishlisted && { color: theme.accent }]}>
                               {isSelectedProductWishlisted ? '♥' : '♡'}
                             </Text>
                           </Pressable>
                         </View>
                       </View>
                       {isSelectedProductBestseller ? (
-                        <View style={styles.bestsellerTag}>
-                          <Text style={styles.bestsellerTagText}>Bestseller</Text>
+                        <View style={[styles.bestsellerTag, detailPageStyles.bestsellerTag]}>
+                          <Text style={[styles.bestsellerTagText, detailPageStyles.bestsellerTagText]}>Bestseller</Text>
                         </View>
                       ) : null}
                     </View>
@@ -3615,8 +3788,8 @@ function MainApp() {
                         <Text style={[styles.ratingText, { color: theme.text }]}>4.9</Text>
                         <Text style={[styles.small, { color: theme.subtext }]}>(1200+ Reviews)</Text>
                         {isSelectedProductPremium ? (
-                          <View style={styles.premiumPill}>
-                            <Text style={styles.premiumPillText}>Premium</Text>
+                          <View style={[styles.premiumPill, detailPageStyles.premiumPill]}>
+                            <Text style={[styles.premiumPillText, detailPageStyles.premiumPillText]}>Premium</Text>
                           </View>
                         ) : null}
                       </View>
@@ -3628,9 +3801,9 @@ function MainApp() {
                             <Text style={[styles.detailPrice, { color: theme.text }]}>₹{detailPrice.base.toLocaleString()}</Text>
                             {detailPrice.discountPct > 0 ? (
                               <>
-                                <Text style={styles.detailMrp}>₹{detailPrice.mrp.toLocaleString()}</Text>
-                                <View style={styles.discountPill}>
-                                  <Text style={styles.discountPillText}>{detailPrice.discountPct}% Off</Text>
+                                <Text style={[styles.detailMrp, detailPageStyles.detailMrp]}>₹{detailPrice.mrp.toLocaleString()}</Text>
+                                <View style={[styles.discountPill, detailPageStyles.discountPill]}>
+                                  <Text style={[styles.discountPillText, detailPageStyles.discountPillText]}>{detailPrice.discountPct}% Off</Text>
                                 </View>
                               </>
                             ) : null}
@@ -3639,18 +3812,12 @@ function MainApp() {
                       })()}
 
                       <View style={styles.featureRow}>
-                        <View style={styles.featureChip}>
-                          <Text style={styles.featureIcon}>≈</Text>
-                          <Text style={styles.featureText}>Pure Sine Wave</Text>
-                        </View>
-                        <View style={styles.featureChip}>
-                          <Text style={styles.featureIcon}>⌗</Text>
-                          <Text style={styles.featureText}>LED Display</Text>
-                        </View>
-                        <View style={styles.featureChip}>
-                          <Text style={styles.featureIcon}>⏱</Text>
-                          <Text style={styles.featureText}>24x7 Support</Text>
-                        </View>
+                        {selectedProductFeatureChips.map(chip => (
+                          <View key={`${chip.icon}-${chip.label}`} style={[styles.featureChip, detailPageStyles.featureChip]}>
+                            <Text style={[styles.featureIcon, detailPageStyles.featureIcon]}>{chip.icon}</Text>
+                            <Text style={[styles.featureText, detailPageStyles.featureText]}>{chip.label}</Text>
+                          </View>
+                        ))}
                       </View>
 
                       <Text style={[styles.itemText, { color: theme.text }]}>Battery Capacity</Text>
@@ -3663,8 +3830,11 @@ function MainApp() {
                             disabled={!isAvailable}
                             style={[
                               styles.capacityBtn,
+                              detailPageStyles.capacityBtn,
                               !isAvailable && styles.capacityBtnDisabled,
+                              !isAvailable && detailPageStyles.capacityBtnDisabled,
                               selectedCapacity === cap && isAvailable && styles.capacityBtnActive,
+                              selectedCapacity === cap && isAvailable && detailPageStyles.capacityBtnActive,
                             ]}
                             onPress={() => {
                               if (!isAvailable) return;
@@ -3674,8 +3844,11 @@ function MainApp() {
                             <Text
                               style={[
                                 styles.capacityText,
+                                detailPageStyles.capacityText,
                                 !isAvailable && styles.capacityTextDisabled,
+                                !isAvailable && detailPageStyles.capacityTextDisabled,
                                 selectedCapacity === cap && isAvailable && styles.capacityTextActive,
+                                selectedCapacity === cap && isAvailable && detailPageStyles.capacityTextActive,
                               ]}
                             >
                               {cap}
@@ -3685,20 +3858,20 @@ function MainApp() {
                         })}
                       </View>
                       {selectedProductAvailableCapacities.length === 0 ? (
-                        <Text style={styles.capacityUnavailableText}>
+                        <Text style={[styles.capacityUnavailableText, detailPageStyles.capacityHint]}>
                           No Ah options available for this product right now.
                         </Text>
                       ) : (
-                        <Text style={styles.capacityUnavailableText}>
+                        <Text style={[styles.capacityUnavailableText, detailPageStyles.capacityHint]}>
                           Unavailable Ah options are disabled.
                         </Text>
                       )}
-                      <Text style={styles.inCartIndicatorText}>
+                      <Text style={[styles.inCartIndicatorText, detailPageStyles.inCartText]}>
                         {selectedVariantCartQty > 0
                           ? `In Cart: ${selectedVariantCartQty} (${selectedCapacity})`
                           : `Not in cart yet (${selectedCapacity})`}
                       </Text>
-                      <Text style={styles.productCartHint}>
+                      <Text style={[styles.productCartHint, detailPageStyles.cartHint]}>
                         {selectedProductCartQty > 0
                           ? `Total added for this product: ${selectedProductCartQty}`
                           : 'This product is not in cart yet'}
@@ -3708,18 +3881,20 @@ function MainApp() {
                         <Pressable
                           style={[
                             styles.addCartBtn,
+                            detailPageStyles.addCartBtn,
                             selectedVariantCartQty > 0 && isSelectedCapacityAvailable && styles.addCartBtnAdded,
+                            selectedVariantCartQty > 0 && isSelectedCapacityAvailable && detailPageStyles.addCartBtnAdded,
                             !isSelectedCapacityAvailable && styles.ctaBtnDisabled,
                           ]}
                           onPress={handleAddToCartFromDetail}
                           disabled={!isSelectedCapacityAvailable}
                         >
-                          <Text style={[styles.addCartText, !isSelectedCapacityAvailable && styles.ctaTextDisabled]}>
+                          <Text style={[styles.addCartText, detailPageStyles.addCartText, !isSelectedCapacityAvailable && styles.ctaTextDisabled]}>
                             {selectedVariantCartQty > 0 ? `Add More (${selectedVariantCartQty})` : 'Add to Cart'}
                           </Text>
                         </Pressable>
                         <Pressable
-                          style={[styles.buyNowBtn, !isSelectedCapacityAvailable && styles.ctaBtnDisabled]}
+                          style={[styles.buyNowBtn, detailPageStyles.buyNowBtn, !isSelectedCapacityAvailable && styles.ctaBtnDisabled]}
                           onPress={handleBuyNowFromDetail}
                           disabled={!isSelectedCapacityAvailable}
                         >
@@ -3990,8 +4165,32 @@ function MainApp() {
             <Text style={[styles.small, { color: theme.subtext }]}>{user?.name || 'Admin'} ({user?.role || 'admin'})</Text>
           </View>
           <View style={styles.topActions}>
-            <Pressable style={[styles.chip, { backgroundColor: theme.steel }]} onPress={loadAll}><Text style={[styles.chipText, { color: theme.text }]}>Refresh</Text></Pressable>
-            <Pressable style={[styles.chip, { backgroundColor: '#B85C5C' }]} onPress={logout}><Text style={[styles.chipText, { color: '#FEE2E2' }]}>Logout</Text></Pressable>
+            <Pressable
+              style={[
+                styles.chip,
+                {
+                  backgroundColor: theme.steel,
+                  borderWidth: 1,
+                  borderColor: theme.steel,
+                },
+              ]}
+              onPress={loadAll}
+            >
+              <Text style={[styles.chipText, { color: theme.text }]}>Refresh</Text>
+            </Pressable>
+            <Pressable
+              style={[
+                styles.chip,
+                {
+                  backgroundColor: isDarkMode ? '#7F1D1D' : '#B85C5C',
+                  borderWidth: 1,
+                  borderColor: isDarkMode ? '#991B1B' : '#B85C5C',
+                },
+              ]}
+              onPress={logout}
+            >
+              <Text style={[styles.chipText, { color: '#FEE2E2' }]}>Logout</Text>
+            </Pressable>
           </View>
         </View>
 
@@ -4008,9 +4207,23 @@ function MainApp() {
               <Pressable
                 key={m.id}
                 onPress={() => setModuleId(m.id)}
-                style={[styles.chip, styles.navSliderChip, active ? styles.adminNavChipActive : styles.adminNavChipInactive]}
+                style={[
+                  styles.chip,
+                  styles.navSliderChip,
+                  active
+                    ? {
+                        backgroundColor: theme.primary,
+                        borderWidth: 1,
+                        borderColor: theme.primary,
+                      }
+                    : {
+                        backgroundColor: theme.steel,
+                        borderWidth: 1,
+                        borderColor: theme.steel,
+                      },
+                ]}
               >
-                <Text style={[styles.chipText, active ? styles.adminNavChipTextActive : { color: theme.subtext }]}>{m.label}</Text>
+                <Text style={[styles.chipText, active ? { color: '#FFFFFF' } : { color: theme.text }]}>{m.label}</Text>
               </Pressable>
             );
           })}
@@ -4033,6 +4246,8 @@ function MainApp() {
           setItemBrand={setItemBrand}
           itemCategory={itemCategory}
           setItemCategory={setItemCategory}
+          itemTechnologyOption={itemTechnologyOption}
+          setItemTechnologyOption={setItemTechnologyOption}
           itemCapacityAh={itemCapacityAh}
           setItemCapacityAh={setItemCapacityAh}
           itemQty={itemQty}

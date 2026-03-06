@@ -20,6 +20,7 @@
     "@react-native-async-storage/async-storage": "^3.0.1",
     "@react-native/new-app-screen": "0.84.0",
     "mysql2": "^3.18.2",
+    "nodemailer": "^7.0.13",
     "react": "19.2.3",
     "react-native": "0.84.0",
     "react-native-safe-area-context": "^5.5.2"
