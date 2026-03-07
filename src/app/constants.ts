@@ -40,7 +40,15 @@ export const APP_UPDATE_APP_ID = 'com.mobile';
 export const APP_UPDATE_CHANNEL = 'production';
 export const ITEM_CATEGORY_OPTIONS = ['Battery', 'Inverter', 'Miscellaneous'];
 export const DEFAULT_ITEM_CATEGORY = 'Inverter';
-export const ITEM_TECHNOLOGY_OPTIONS: ItemTechnologyOption[] = ['Sinewave', 'Eco Watt', 'Advanced Digital'];
+export const ITEM_TECHNOLOGY_OPTIONS: ItemTechnologyOption[] = [
+  'Sinewave',
+  'Eco Watt',
+  'Advanced Digital',
+  'Tall Tubular',
+  'Jumboz Tubular',
+  'Jumboz Short Tubular',
+  'Super Jumboz Tubular',
+];
 export const DEFAULT_ITEM_TECHNOLOGY: ItemTechnologyOption = 'Sinewave';
 
 export const LANDING_HERO_IMAGE = require('../assets/images/land-page-bg.png');

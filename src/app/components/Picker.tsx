@@ -12,6 +12,7 @@ type PickerProps = {
   onSelect: (id: string) => void;
   theme: Theme;
   selectedStyle?: 'filled' | 'outlined';
+  allowDeselect?: boolean;
 };
 
 function Picker({
@@ -21,6 +22,7 @@ function Picker({
   onSelect,
   theme,
   selectedStyle = 'outlined',
+  allowDeselect = false,
 }: PickerProps) {
   if (options.length === 0) {
     return <Text style={[styles.small, { color: theme.warning }]}>{label}: no records found</Text>;
@@ -62,7 +64,7 @@ function Picker({
           return (
             <Pressable
               key={o.id}
-              onPress={() => onSelect(o.id)}
+              onPress={() => onSelect(allowDeselect && selected ? '' : o.id)}
               style={[
                 styles.chip,
                 styles.navSliderChip,

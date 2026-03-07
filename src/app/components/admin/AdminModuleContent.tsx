@@ -8,6 +8,7 @@ import { ITEM_CATEGORY_OPTIONS, ITEM_TECHNOLOGY_OPTIONS } from '../../constants'
 import styles from '../../styles';
 
 type Props = any;
+const MANUAL_CAPACITY_OPTION_ID = '__manual_capacity__';
 
 function AdminModuleContent(props: Props) {
   const {
@@ -109,8 +110,14 @@ function AdminModuleContent(props: Props) {
   );
   const itemTagOptions = React.useMemo(() => [{ id: 'bestseller', label: 'Bestseller' }, { id: 'premium', label: 'Premium' }], []);
   const presetBrands = React.useMemo(() => ['microtek', 'sukam', 'lumious', 'exide'], []);
+  const presetCapacityValues = React.useMemo(() => ahOptions.map(option => option.id), [ahOptions]);
+  const capacityOptions = React.useMemo(
+    () => [...ahOptions, { id: MANUAL_CAPACITY_OPTION_ID, label: 'Manual Ah' }],
+    [ahOptions],
+  );
   const [isCreateBrandDropdownVisible, setIsCreateBrandDropdownVisible] = React.useState(false);
   const [isEditBrandDropdownVisible, setIsEditBrandDropdownVisible] = React.useState(false);
+  const [isManualCapacityMode, setIsManualCapacityMode] = React.useState(false);
   const brandDropdownCloseTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const clearBrandDropdownCloseTimer = React.useCallback(() => {
@@ -161,6 +168,14 @@ function AdminModuleContent(props: Props) {
     setIsEditBrandDropdownVisible(false);
   }, [isItemEditModalVisible]);
 
+  React.useEffect(() => {
+    const rawCapacity = String(itemCapacityAh || '').trim();
+    if (!rawCapacity) {
+      return;
+    }
+    setIsManualCapacityMode(!presetCapacityValues.includes(rawCapacity));
+  }, [itemCapacityAh, presetCapacityValues]);
+
   React.useEffect(() => () => clearBrandDropdownCloseTimer(), [clearBrandDropdownCloseTimer]);
 
   const toBrandLabel = React.useCallback((value: string) => {
@@ -210,6 +225,39 @@ function AdminModuleContent(props: Props) {
     closeBrandDropdown(context);
     setItemBrand('');
   }, [closeBrandDropdown, setItemBrand]);
+
+  const handleCapacitySelect = React.useCallback(
+    (selectedId: string) => {
+      if (selectedId === MANUAL_CAPACITY_OPTION_ID) {
+        setIsManualCapacityMode(true);
+        if (presetCapacityValues.includes(String(itemCapacityAh || '').trim())) {
+          setItemCapacityAh('');
+        }
+        return;
+      }
+      setIsManualCapacityMode(false);
+      setItemCapacityAh(selectedId);
+    },
+    [itemCapacityAh, presetCapacityValues, setItemCapacityAh],
+  );
+
+  const manualCapacityValue = React.useMemo(() => {
+    const raw = String(itemCapacityAh || '').trim();
+    if (!raw) {
+      return '';
+    }
+    const compact = raw.replace(/\s+/g, '');
+    const numericMatch = compact.match(/^(\d{1,4})(?:ah)?$/i);
+    return numericMatch?.[1] || raw.replace(/\s*ah$/i, '');
+  }, [itemCapacityAh]);
+
+  const handleManualCapacityChange = React.useCallback(
+    (value: string) => {
+      const digits = value.replace(/[^0-9]/g, '').slice(0, 4);
+      setItemCapacityAh(digits ? `${digits}Ah` : '');
+    },
+    [setItemCapacityAh],
+  );
 
   const selectedItemTags = React.useMemo(
     () => (Array.isArray(itemTags) ? itemTags.map((tag: unknown) => String(tag || '').trim().toLowerCase()) : []),
@@ -326,19 +374,33 @@ function AdminModuleContent(props: Props) {
               theme={theme}
             />
             <Picker
-              label="Technology"
+              label="Technology (Optional)"
               selectedId={itemTechnologyOption}
               options={technologyOptions}
               onSelect={setItemTechnologyOption}
               theme={theme}
+              allowDeselect
             />
             <Picker
               label="Capacity (Ah)"
-              selectedId={itemCapacityAh}
-              options={ahOptions}
-              onSelect={setItemCapacityAh}
+              selectedId={isManualCapacityMode ? MANUAL_CAPACITY_OPTION_ID : itemCapacityAh}
+              options={capacityOptions}
+              onSelect={handleCapacitySelect}
               theme={theme}
             />
+            {isManualCapacityMode ? (
+              <>
+                <Text style={[styles.small, styles.fieldLabel, { color: theme.subtext }]}>Manual Capacity (Ah)</Text>
+                <TextInput
+                  value={manualCapacityValue}
+                  onChangeText={handleManualCapacityChange}
+                  placeholder="e.g. 135"
+                  keyboardType="numeric"
+                  placeholderTextColor={theme.subtext}
+                  style={[styles.input, { color: theme.text, backgroundColor: theme.steel }]}
+                />
+              </>
+            ) : null}
             <Text style={[styles.small, styles.fieldLabel, { color: theme.subtext }]}>Tags (Optional)</Text>
             <View style={styles.itemTagRow}>
               {itemTagOptions.map(tag => {
@@ -532,19 +594,33 @@ function AdminModuleContent(props: Props) {
                     theme={theme}
                   />
                   <Picker
-                    label="Technology"
+                    label="Technology (Optional)"
                     selectedId={itemTechnologyOption}
                     options={technologyOptions}
                     onSelect={setItemTechnologyOption}
                     theme={theme}
+                    allowDeselect
                   />
                   <Picker
                     label="Capacity (Ah)"
-                    selectedId={itemCapacityAh}
-                    options={ahOptions}
-                    onSelect={setItemCapacityAh}
+                    selectedId={isManualCapacityMode ? MANUAL_CAPACITY_OPTION_ID : itemCapacityAh}
+                    options={capacityOptions}
+                    onSelect={handleCapacitySelect}
                     theme={theme}
                   />
+                  {isManualCapacityMode ? (
+                    <>
+                      <Text style={[styles.small, styles.fieldLabel, { color: theme.subtext }]}>Manual Capacity (Ah)</Text>
+                      <TextInput
+                        value={manualCapacityValue}
+                        onChangeText={handleManualCapacityChange}
+                        placeholder="e.g. 135"
+                        keyboardType="numeric"
+                        placeholderTextColor={theme.subtext}
+                        style={[styles.input, { color: theme.text, backgroundColor: theme.steel }]}
+                      />
+                    </>
+                  ) : null}
                   <Text style={[styles.small, styles.fieldLabel, { color: theme.subtext }]}>Tags (Optional)</Text>
                   <View style={styles.itemTagRow}>
                     {itemTagOptions.map(tag => {

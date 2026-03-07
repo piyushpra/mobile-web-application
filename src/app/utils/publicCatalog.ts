@@ -2,6 +2,33 @@ import type { DeliveryLocation, PublicProduct, PublicProductDetail } from '../ty
 
 export const ALL_CAPACITY_OPTIONS = ['110Ah', '120Ah', '150Ah', '200Ah', '220Ah'] as const;
 
+const normalizeCapacityLabel = (value: unknown) => {
+  const raw = String(value || '').trim();
+  if (!raw) {
+    return '';
+  }
+  const preset = ALL_CAPACITY_OPTIONS.find(option => option.toLowerCase() === raw.toLowerCase());
+  if (preset) {
+    return preset;
+  }
+  const compact = raw.replace(/\s+/g, '');
+  const numericMatch = compact.match(/^(\d{2,4})(?:ah)?$/i);
+  if (numericMatch?.[1]) {
+    return `${numericMatch[1]}Ah`;
+  }
+  return raw;
+};
+
+const sortCapacityLabels = (values: string[]) =>
+  [...values].sort((left, right) => {
+    const leftNum = parseInt(left, 10);
+    const rightNum = parseInt(right, 10);
+    if (Number.isFinite(leftNum) && Number.isFinite(rightNum) && leftNum !== rightNum) {
+      return leftNum - rightNum;
+    }
+    return left.localeCompare(right);
+  });
+
 export const getOfferLabel = (product: PublicProduct): string | null => {
   const source = `${product.shortDescription || ''} ${product.model || ''}`.trim();
   if (!source) {
@@ -41,12 +68,12 @@ export const getDetailPrice = (product: PublicProductDetail) => {
 export const getAvailableCapacities = (product: PublicProductDetail) => {
   const apiCapacities = Array.isArray(product.availableCapacities)
     ? product.availableCapacities
-        .map(cap => String(cap || '').trim())
-        .filter(cap => ALL_CAPACITY_OPTIONS.includes(cap as (typeof ALL_CAPACITY_OPTIONS)[number]))
+        .map(cap => normalizeCapacityLabel(cap))
+        .filter(Boolean)
     : [];
 
   if (apiCapacities.length > 0) {
-    return Array.from(new Set(apiCapacities));
+    return sortCapacityLabels(Array.from(new Set(apiCapacities)));
   }
 
   const merged = `${product.model} ${product.description}`.toLowerCase();
@@ -55,7 +82,8 @@ export const getAvailableCapacities = (product: PublicProductDetail) => {
 };
 
 export const getCapacityOptions = (product: PublicProductDetail) => {
-  return [...ALL_CAPACITY_OPTIONS];
+  const available = getAvailableCapacities(product);
+  return available.length > 0 ? available : [...ALL_CAPACITY_OPTIONS];
 };
 
 export const locationMatchesQuery = (loc: DeliveryLocation, query: string) => {

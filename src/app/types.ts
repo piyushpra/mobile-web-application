@@ -1,5 +1,12 @@
 export type Role = 'admin' | 'manager' | 'staff';
-export type ItemTechnologyOption = 'Sinewave' | 'Eco Watt' | 'Advanced Digital';
+export type ItemTechnologyOption =
+  | 'Sinewave'
+  | 'Eco Watt'
+  | 'Advanced Digital'
+  | 'Tall Tubular'
+  | 'Jumboz Tubular'
+  | 'Jumboz Short Tubular'
+  | 'Super Jumboz Tubular';
 
 export type ModuleId =
   | 'home'
@@ -133,6 +140,67 @@ export type Party = {
   email: string;
   phone: string;
   gstin: string;
+  billingAddress?: string;
+  shippingAddress?: string;
+};
+
+export type InvoiceLine = {
+  id?: string;
+  itemId?: string | null;
+  itemName: string;
+  description?: string;
+  sku?: string;
+  unit?: string;
+  hsnCode?: string;
+  qty: number;
+  unitPrice: number;
+  taxRate?: number;
+  grossAmount?: number;
+  discountAmount?: number;
+  netAmount?: number;
+  lineTotal: number;
+  taxableValue?: number;
+  gstAmount?: number;
+  cgstAmount?: number;
+  sgstAmount?: number;
+  igstAmount?: number;
+};
+
+export type InvoiceDetail = {
+  id: string;
+  orderId?: string;
+  orderNumber?: string;
+  invoiceNumber: string;
+  customerId?: string;
+  customerName?: string;
+  status: string;
+  dueDate?: string;
+  total: number;
+  createdAt: string;
+  paidAt?: string;
+  subtotal: number;
+  discount: number;
+  deliveryFee: number;
+  taxableTotal: number;
+  gstTotal: number;
+  cgstTotal: number;
+  sgstTotal: number;
+  igstTotal: number;
+  roundOff?: number;
+  billToName: string;
+  billToPhone?: string;
+  billToEmail?: string;
+  billToGstin?: string;
+  billToAddress?: string;
+  shipToAddress?: string;
+  placeOfSupply?: string;
+  sellerName: string;
+  sellerGstin?: string;
+  sellerAddress?: string;
+  sellerState?: string;
+  pricesIncludeGst: boolean;
+  amountInWords: string;
+  lines: InvoiceLine[];
 };
 
 export type Doc = {
@@ -149,7 +217,51 @@ export type Doc = {
   customer?: string;
   supplierName?: string;
   customerName?: string;
-  lines: Array<{ itemName: string; qty: number }>;
+  subtotal?: number;
+  discount?: number;
+  deliveryFee?: number;
+  taxableTotal?: number;
+  gstTotal?: number;
+  cgstTotal?: number;
+  sgstTotal?: number;
+  igstTotal?: number;
+  roundOff?: number;
+  billToName?: string;
+  billToPhone?: string;
+  billToEmail?: string;
+  billToGstin?: string;
+  billToAddress?: string;
+  shipToAddress?: string;
+  placeOfSupply?: string;
+  sellerName?: string;
+  sellerGstin?: string;
+  sellerAddress?: string;
+  sellerState?: string;
+  amountInWords?: string;
+  orderId?: string;
+  orderNumber?: string;
+  lines: Array<{
+    id?: string;
+    itemId?: string | null;
+    itemName: string;
+    description?: string;
+    sku?: string;
+    unit?: string;
+    qty: number;
+    unitPrice?: number;
+    unitCost?: number;
+    lineTotal?: number;
+    hsnCode?: string;
+    taxRate?: number;
+    grossAmount?: number;
+    discountAmount?: number;
+    netAmount?: number;
+    taxableValue?: number;
+    gstAmount?: number;
+    cgstAmount?: number;
+    sgstAmount?: number;
+    igstAmount?: number;
+  }>;
 };
 
 export type Movement = {
@@ -163,15 +275,33 @@ export type Movement = {
 
 export type ProfileOrder = {
   id: string;
+  orderNumber: string;
   createdAt: string;
   itemCount: number;
   total: number;
+  subtotal?: number;
+  discount?: number;
+  deliveryFee?: number;
   status: 'Processing' | 'Delivered' | 'Cancelled';
   productId?: string | null;
   brand?: string;
   category?: string;
   model?: string;
   thumbnail?: string;
+  items: Array<{
+    id: string;
+    productId?: string | null;
+    name: string;
+    brand?: string;
+    category?: string;
+    model?: string;
+    capacity?: string;
+    qty: number;
+    unitPrice?: number;
+    lineTotal?: number;
+    thumbnail?: string;
+  }>;
+  invoice?: InvoiceDetail | null;
 };
 
 export type ProfilePaymentMethod = {

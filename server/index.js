@@ -117,6 +117,42 @@ const defaultDb = {
   counters: { po: 1, so: 1, bill: 1, inv: 1 },
 };
 
+const DEFAULT_INVOICE_SELLER = Object.freeze({
+  sellerName: 'FuElectric',
+  sellerGstin: '',
+  sellerAddress: 'New Delhi, Delhi, India',
+  sellerState: 'Delhi',
+});
+const INVOICE_DOWNLOAD_LINK_TTL_MS = 1000 * 60 * 15;
+const INVOICE_DOWNLOAD_SECRET = crypto
+  .createHash('sha256')
+  .update(`${MYSQL_PASSWORD}|${APP_NAME}|invoice-download`)
+  .digest('hex');
+
+const NUMBER_WORDS_ONES = [
+  'zero',
+  'one',
+  'two',
+  'three',
+  'four',
+  'five',
+  'six',
+  'seven',
+  'eight',
+  'nine',
+  'ten',
+  'eleven',
+  'twelve',
+  'thirteen',
+  'fourteen',
+  'fifteen',
+  'sixteen',
+  'seventeen',
+  'eighteen',
+  'nineteen',
+];
+const NUMBER_WORDS_TENS = ['', '', 'twenty', 'thirty', 'forty', 'fifty', 'sixty', 'seventy', 'eighty', 'ninety'];
+
 function parseNumber(value, fallback = 0) {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : fallback;
@@ -124,6 +160,351 @@ function parseNumber(value, fallback = 0) {
 
 function clamp2(num) {
   return Math.round(num * 100) / 100;
+}
+
+function compactText(value) {
+  return String(value || '').trim();
+}
+
+function joinNonEmpty(parts, separator = ', ') {
+  return parts.map(compactText).filter(Boolean).join(separator);
+}
+
+function normalizeStateKey(value) {
+  return compactText(value).toLowerCase().replace(/[^a-z]/g, '');
+}
+
+function getInvoiceSellerProfile() {
+  return { ...DEFAULT_INVOICE_SELLER };
+}
+
+function buildLocationAddress(location) {
+  if (!location) return '';
+  const label = compactText(location.label);
+  const details = joinNonEmpty(
+    [location.area, location.city, location.state, location.country].filter(Boolean),
+  );
+  const pincode = compactText(location.pincode);
+  const base = label || details;
+  if (base && pincode && !base.includes(pincode)) {
+    return joinNonEmpty([base, pincode]);
+  }
+  return base || pincode;
+}
+
+function formatPlaceOfSupply(location, fallbackAddress = '') {
+  if (location) {
+    return joinNonEmpty([location.state, location.pincode], ' - ') || buildLocationAddress(location);
+  }
+  return compactText(fallbackAddress) || DEFAULT_INVOICE_SELLER.sellerState;
+}
+
+function numberToIndianWords(value) {
+  const number = Math.max(0, Math.floor(parseNumber(value, 0)));
+  if (number < 20) {
+    return NUMBER_WORDS_ONES[number];
+  }
+  if (number < 100) {
+    const tens = NUMBER_WORDS_TENS[Math.floor(number / 10)];
+    const unit = number % 10;
+    return unit ? `${tens} ${NUMBER_WORDS_ONES[unit]}` : tens;
+  }
+  if (number < 1000) {
+    const hundreds = `${NUMBER_WORDS_ONES[Math.floor(number / 100)]} hundred`;
+    const remainder = number % 100;
+    return remainder ? `${hundreds} ${numberToIndianWords(remainder)}` : hundreds;
+  }
+  const units = [
+    { value: 10000000, label: 'crore' },
+    { value: 100000, label: 'lakh' },
+    { value: 1000, label: 'thousand' },
+  ];
+  for (const unit of units) {
+    if (number >= unit.value) {
+      const major = Math.floor(number / unit.value);
+      const remainder = number % unit.value;
+      const majorWords = `${numberToIndianWords(major)} ${unit.label}`;
+      return remainder ? `${majorWords} ${numberToIndianWords(remainder)}` : majorWords;
+    }
+  }
+  return '';
+}
+
+function amountToIndianCurrencyWords(value) {
+  const safeAmount = clamp2(Math.max(0, parseNumber(value, 0)));
+  const totalPaise = Math.round(safeAmount * 100);
+  const rupees = Math.floor(totalPaise / 100);
+  const paise = totalPaise % 100;
+  const rupeeWords = rupees === 0 ? 'zero rupees' : `${numberToIndianWords(rupees)} rupees`;
+  const paiseWords = paise > 0 ? ` and ${numberToIndianWords(paise)} paise` : '';
+  return `${(rupeeWords + paiseWords + ' only').replace(/\s+/g, ' ').trim()}`.replace(/\b[a-z]/g, match =>
+    match.toUpperCase(),
+  );
+}
+
+function allocateDiscountAcrossAmounts(amounts, totalDiscount) {
+  const safeAmounts = (Array.isArray(amounts) ? amounts : []).map(amount => clamp2(Math.max(0, parseNumber(amount, 0))));
+  const subtotal = clamp2(safeAmounts.reduce((sum, amount) => sum + amount, 0));
+  const discount = clamp2(Math.min(Math.max(0, parseNumber(totalDiscount, 0)), subtotal));
+  let allocated = 0;
+  return safeAmounts.map((amount, index) => {
+    if (index === safeAmounts.length - 1) {
+      return clamp2(Math.min(amount, discount - allocated));
+    }
+    const rawShare = subtotal > 0 ? clamp2((discount * amount) / subtotal) : 0;
+    const share = clamp2(Math.min(amount, Math.max(0, rawShare), discount - allocated));
+    allocated = clamp2(allocated + share);
+    return share;
+  });
+}
+
+function shouldSplitGstToCgstSgst({ sellerState, placeOfSupplyState, shipToAddress }) {
+  const sellerKey = normalizeStateKey(sellerState);
+  const placeKey = normalizeStateKey(placeOfSupplyState);
+  if (sellerKey && placeKey) {
+    return sellerKey === placeKey;
+  }
+  const shipping = compactText(shipToAddress).toLowerCase();
+  return Boolean(sellerState && shipping && shipping.includes(compactText(sellerState).toLowerCase()));
+}
+
+function decorateInvoiceLine(line) {
+  const unitPrice = clamp2(Math.max(0, parseNumber(line.unitPrice, 0)));
+  const qty = Math.max(0, parseNumber(line.qty, 0));
+  const grossAmount = clamp2(parseNumber(line.grossAmount, parseNumber(line.lineTotal, unitPrice * qty)));
+  const discountAmount = clamp2(Math.max(0, parseNumber(line.discountAmount, 0)));
+  const lineTotal = clamp2(Math.max(0, parseNumber(line.netAmount, grossAmount - discountAmount)));
+  const taxRate = clamp2(Math.max(0, parseNumber(line.taxRate, 0)));
+  const taxableValue = clamp2(
+    parseNumber(line.taxableValue, taxRate > 0 ? (lineTotal * 100) / (100 + taxRate) : lineTotal),
+  );
+  const gstAmount = clamp2(Math.max(0, parseNumber(line.gstAmount, lineTotal - taxableValue)));
+  const cgstAmount = clamp2(Math.max(0, parseNumber(line.cgstAmount, 0)));
+  const sgstAmount = clamp2(Math.max(0, parseNumber(line.sgstAmount, 0)));
+  const igstAmount = clamp2(Math.max(0, parseNumber(line.igstAmount, 0)));
+
+  return {
+    id: compactText(line.id),
+    itemId: compactText(line.itemId),
+    itemName: compactText(line.itemName) || 'Item',
+    description: compactText(line.description) || compactText(line.itemName) || 'Item',
+    sku: compactText(line.sku),
+    unit: compactText(line.unit) || 'pcs',
+    hsnCode: compactText(line.hsnCode),
+    qty,
+    unitPrice,
+    taxRate,
+    grossAmount,
+    discountAmount,
+    netAmount: lineTotal,
+    lineTotal,
+    taxableValue,
+    gstAmount,
+    cgstAmount,
+    sgstAmount,
+    igstAmount,
+  };
+}
+
+function decorateInvoiceDocument(invoice) {
+  const seller = getInvoiceSellerProfile();
+  const lines = (Array.isArray(invoice.lines) ? invoice.lines : []).map(decorateInvoiceLine);
+  const subtotal = clamp2(
+    parseNumber(
+      invoice.subtotal,
+      lines.reduce((sum, line) => sum + line.grossAmount, 0),
+    ),
+  );
+  const discount = clamp2(
+    parseNumber(
+      invoice.discount,
+      lines.reduce((sum, line) => sum + line.discountAmount, 0),
+    ),
+  );
+  const deliveryFee = clamp2(Math.max(0, parseNumber(invoice.deliveryFee, 0)));
+  const taxableTotal = clamp2(
+    parseNumber(
+      invoice.taxableTotal,
+      lines.reduce((sum, line) => sum + line.taxableValue, 0),
+    ),
+  );
+  const gstTotal = clamp2(
+    parseNumber(
+      invoice.gstTotal,
+      lines.reduce((sum, line) => sum + line.gstAmount, 0),
+    ),
+  );
+  const cgstTotal = clamp2(
+    parseNumber(
+      invoice.cgstTotal,
+      lines.reduce((sum, line) => sum + line.cgstAmount, 0),
+    ),
+  );
+  const sgstTotal = clamp2(
+    parseNumber(
+      invoice.sgstTotal,
+      lines.reduce((sum, line) => sum + line.sgstAmount, 0),
+    ),
+  );
+  const igstTotal = clamp2(
+    parseNumber(
+      invoice.igstTotal,
+      lines.reduce((sum, line) => sum + line.igstAmount, 0),
+    ),
+  );
+  const total = clamp2(parseNumber(invoice.total, subtotal - discount + deliveryFee));
+  const roundOff = clamp2(parseNumber(invoice.roundOff, total - (subtotal - discount + deliveryFee)));
+
+  return {
+    id: compactText(invoice.id),
+    orderId: compactText(invoice.orderId),
+    orderNumber: compactText(invoice.orderNumber),
+    invoiceNumber: compactText(invoice.invoiceNumber),
+    customerId: compactText(invoice.customerId),
+    customerName: compactText(invoice.customerName) || compactText(invoice.billToName) || 'Customer',
+    status: compactText(invoice.status) || 'Open',
+    dueDate: compactText(invoice.dueDate),
+    total,
+    createdAt: invoice.createdAt || new Date().toISOString(),
+    paidAt: compactText(invoice.paidAt),
+    subtotal,
+    discount,
+    deliveryFee,
+    taxableTotal,
+    gstTotal,
+    cgstTotal,
+    sgstTotal,
+    igstTotal,
+    roundOff,
+    billToName: compactText(invoice.billToName) || compactText(invoice.customerName) || 'Customer',
+    billToPhone: compactText(invoice.billToPhone),
+    billToEmail: compactText(invoice.billToEmail),
+    billToGstin: compactText(invoice.billToGstin),
+    billToAddress: compactText(invoice.billToAddress),
+    shipToAddress: compactText(invoice.shipToAddress) || compactText(invoice.billToAddress),
+    placeOfSupply: compactText(invoice.placeOfSupply) || compactText(invoice.shipToAddress) || seller.sellerState,
+    pricesIncludeGst: true,
+    amountInWords: amountToIndianCurrencyWords(total),
+    ...seller,
+    lines,
+  };
+}
+
+function buildInvoiceDocument({
+  id,
+  invoiceNumber,
+  orderId = '',
+  orderNumber = '',
+  customerId,
+  customerName,
+  status = 'Open',
+  dueDate = '',
+  createdAt = new Date().toISOString(),
+  paidAt = '',
+  subtotal = 0,
+  discount = 0,
+  deliveryFee = 0,
+  billToName,
+  billToPhone,
+  billToEmail,
+  billToGstin,
+  billToAddress,
+  shipToAddress,
+  placeOfSupply,
+  placeOfSupplyState = '',
+  lines = [],
+}) {
+  const seller = getInvoiceSellerProfile();
+  const preparedLines = Array.isArray(lines) ? lines : [];
+  const grossSubtotal = clamp2(
+    preparedLines.reduce((sum, line) => sum + clamp2(Math.max(0, parseNumber(line.unitPrice, 0)) * Math.max(0, parseNumber(line.qty, 0))), 0),
+  );
+  const safeSubtotal = clamp2(Math.max(0, parseNumber(subtotal, grossSubtotal)));
+  const safeDiscount = clamp2(Math.min(Math.max(0, parseNumber(discount, 0)), safeSubtotal));
+  const safeDeliveryFee = clamp2(Math.max(0, parseNumber(deliveryFee, 0)));
+  const lineDiscounts = allocateDiscountAcrossAmounts(
+    preparedLines.map(line => clamp2(Math.max(0, parseNumber(line.unitPrice, 0)) * Math.max(0, parseNumber(line.qty, 0)))),
+    safeDiscount,
+  );
+  const intraState = shouldSplitGstToCgstSgst({
+    sellerState: seller.sellerState,
+    placeOfSupplyState,
+    shipToAddress,
+  });
+
+  const computedLines = preparedLines.map((line, index) => {
+    const qty = Math.max(0, parseNumber(line.qty, 0));
+    const unitPrice = clamp2(Math.max(0, parseNumber(line.unitPrice, 0)));
+    const grossAmount = clamp2(unitPrice * qty);
+    const discountAmount = clamp2(lineDiscounts[index] || 0);
+    const netAmount = clamp2(Math.max(0, grossAmount - discountAmount));
+    const taxRate = clamp2(Math.max(0, parseNumber(line.taxRate, 0)));
+    const taxableValue = clamp2(taxRate > 0 ? (netAmount * 100) / (100 + taxRate) : netAmount);
+    const gstAmount = clamp2(Math.max(0, netAmount - taxableValue));
+    const cgstAmount = taxRate > 0 && intraState ? clamp2(gstAmount / 2) : 0;
+    const sgstAmount = taxRate > 0 && intraState ? clamp2(gstAmount - cgstAmount) : 0;
+    const igstAmount = taxRate > 0 && !intraState ? gstAmount : 0;
+    return decorateInvoiceLine({
+      id: compactText(line.id) || `il_${crypto.randomUUID().slice(0, 8)}`,
+      itemId: compactText(line.itemId),
+      itemName: compactText(line.itemName),
+      description:
+        compactText(line.description) ||
+        joinNonEmpty([line.itemName, line.model, line.capacity], ' • ') ||
+        compactText(line.itemName),
+      sku: compactText(line.sku),
+      unit: compactText(line.unit) || 'pcs',
+      hsnCode: compactText(line.hsnCode),
+      qty,
+      unitPrice,
+      taxRate,
+      grossAmount,
+      discountAmount,
+      netAmount,
+      taxableValue,
+      gstAmount,
+      cgstAmount,
+      sgstAmount,
+      igstAmount,
+    });
+  });
+
+  const decorated = decorateInvoiceDocument({
+    id,
+    orderId,
+    orderNumber,
+    invoiceNumber,
+    customerId,
+    customerName,
+    status,
+    dueDate,
+    total: clamp2(safeSubtotal - safeDiscount + safeDeliveryFee),
+    createdAt,
+    paidAt,
+    subtotal: safeSubtotal,
+    discount: safeDiscount,
+    deliveryFee: safeDeliveryFee,
+    taxableTotal: computedLines.reduce((sum, line) => sum + line.taxableValue, 0),
+    gstTotal: computedLines.reduce((sum, line) => sum + line.gstAmount, 0),
+    cgstTotal: computedLines.reduce((sum, line) => sum + line.cgstAmount, 0),
+    sgstTotal: computedLines.reduce((sum, line) => sum + line.sgstAmount, 0),
+    igstTotal: computedLines.reduce((sum, line) => sum + line.igstAmount, 0),
+    roundOff: 0,
+    billToName,
+    billToPhone,
+    billToEmail,
+    billToGstin,
+    billToAddress,
+    shipToAddress,
+    placeOfSupply,
+    lines: computedLines,
+  });
+
+  return {
+    ...decorated,
+    customerId,
+    customerName: compactText(customerName) || compactText(billToName) || 'Customer',
+  };
 }
 
 function compareAppVersions(left, right) {
@@ -574,12 +955,43 @@ function computeStatus(qty, reorderPoint = 8) {
 
 const AH_OPTIONS = ['110Ah', '120Ah', '150Ah', '200Ah', '220Ah'];
 const ITEM_CATEGORY_OPTIONS = ['Battery', 'Inverter', 'Miscellaneous'];
-const ITEM_TECHNOLOGY_OPTIONS = ['Sinewave', 'Eco Watt', 'Advanced Digital'];
+const ITEM_TECHNOLOGY_OPTIONS = [
+  'Sinewave',
+  'Eco Watt',
+  'Advanced Digital',
+  'Tall Tubular',
+  'Jumboz Tubular',
+  'Jumboz Short Tubular',
+  'Super Jumboz Tubular',
+];
 const ITEM_TAGS = ['bestseller', 'premium'];
 
 function normalizeCapacityAh(value) {
   const raw = String(value || '').trim();
-  return AH_OPTIONS.includes(raw) ? raw : '150Ah';
+  if (!raw) {
+    return '150Ah';
+  }
+  const preset = AH_OPTIONS.find(option => option.toLowerCase() === raw.toLowerCase());
+  if (preset) {
+    return preset;
+  }
+  const compact = raw.replace(/\s+/g, '');
+  const numericMatch = compact.match(/^(\d{2,4})(?:ah)?$/i);
+  if (numericMatch?.[1]) {
+    return `${numericMatch[1]}Ah`;
+  }
+  return raw.slice(0, 20);
+}
+
+function compareCapacityAh(a, b) {
+  const aText = String(a || '').trim();
+  const bText = String(b || '').trim();
+  const aNum = parseInt(aText, 10);
+  const bNum = parseInt(bText, 10);
+  if (Number.isFinite(aNum) && Number.isFinite(bNum) && aNum !== bNum) {
+    return aNum - bNum;
+  }
+  return aText.localeCompare(bText);
 }
 
 function normalizeTechnologyOption(value) {
@@ -600,6 +1012,26 @@ function normalizeTechnologyOption(value) {
     normalized === 'advanceddigital'
   ) {
     return 'Advanced Digital';
+  }
+  if (normalized === 'tall tubular' || normalized === 'tall-tubular' || normalized === 'talltubular') {
+    return 'Tall Tubular';
+  }
+  if (normalized === 'jumboz tubular' || normalized === 'jumboz-tubular' || normalized === 'jumboztubular') {
+    return 'Jumboz Tubular';
+  }
+  if (
+    normalized === 'jumboz short tubular' ||
+    normalized === 'jumboz-short-tubular' ||
+    normalized === 'jumbozshorttubular'
+  ) {
+    return 'Jumboz Short Tubular';
+  }
+  if (
+    normalized === 'super jumboz tubular' ||
+    normalized === 'super-jumboz-tubular' ||
+    normalized === 'superjumboztubular'
+  ) {
+    return 'Super Jumboz Tubular';
   }
   return ITEM_TECHNOLOGY_OPTIONS.includes(raw) ? raw : '';
 }
@@ -892,6 +1324,307 @@ function toYmd(value) {
   return dt.toISOString().slice(0, 10);
 }
 
+async function reserveDocumentNumber(conn, counterKey, prefix) {
+  const key = compactText(counterKey).toUpperCase();
+  const [rows] = await conn.query(
+    `SELECT next_value
+     FROM document_counters
+     WHERE counter_key = ?
+     FOR UPDATE`,
+    [key],
+  );
+  let nextValue = parseNumber(Array.isArray(rows) && rows[0] ? rows[0].next_value : 0, 0);
+  if (!nextValue) {
+    nextValue = 1;
+    await conn.query(
+      `INSERT INTO document_counters (counter_key, next_value)
+       VALUES (?, 2)
+       ON DUPLICATE KEY UPDATE next_value = next_value`,
+      [key],
+    );
+  } else {
+    await conn.query(
+      `UPDATE document_counters
+       SET next_value = ?
+       WHERE counter_key = ?`,
+      [nextValue + 1, key],
+    );
+  }
+  return `${compactText(prefix) || key}-${String(nextValue).padStart(4, '0')}`;
+}
+
+async function ensureStorefrontCustomer(conn, owner, checkoutProfile) {
+  let userProfile = null;
+  if (owner?.userId) {
+    const [userRows] = await conn.query(
+      `SELECT full_name, username, phone
+       FROM users
+       WHERE id = ?
+       LIMIT 1`,
+      [owner.userId],
+    );
+    userProfile = Array.isArray(userRows) ? userRows[0] || null : null;
+  }
+
+  const firstName = compactText(checkoutProfile.firstName);
+  const lastName = compactText(checkoutProfile.lastName);
+  const fullName = joinNonEmpty(
+    [firstName, lastName],
+    ' ',
+  ) || compactText(userProfile?.full_name) || 'Guest Customer';
+  const email = compactText(checkoutProfile.email) || compactText(userProfile?.username);
+  const phone = compactText(checkoutProfile.phone) || compactText(userProfile?.phone);
+  const billingAddress = compactText(checkoutProfile.billingAddress);
+  const shippingAddress = compactText(checkoutProfile.shippingAddress) || billingAddress;
+
+  let existing = null;
+  if (email) {
+    const [rows] = await conn.query(
+      `SELECT id, name, company, email, phone, gstin, billing_address, shipping_address
+       FROM customers
+       WHERE LOWER(TRIM(COALESCE(email, ''))) = LOWER(?)
+       ORDER BY updated_at DESC
+       LIMIT 1`,
+      [email],
+    );
+    existing = Array.isArray(rows) ? rows[0] || null : null;
+  }
+  if (!existing && phone) {
+    const [rows] = await conn.query(
+      `SELECT id, name, company, email, phone, gstin, billing_address, shipping_address
+       FROM customers
+       WHERE TRIM(COALESCE(phone, '')) = ?
+       ORDER BY updated_at DESC
+       LIMIT 1`,
+      [phone],
+    );
+    existing = Array.isArray(rows) ? rows[0] || null : null;
+  }
+
+  const customerId = compactText(existing?.id) || `cus_${crypto.randomUUID().slice(0, 8)}`;
+  const customer = {
+    id: customerId,
+    name: fullName || compactText(existing?.name) || 'Customer',
+    company: compactText(existing?.company),
+    email: email || compactText(existing?.email),
+    phone: phone || compactText(existing?.phone),
+    gstin: compactText(existing?.gstin),
+    billingAddress: billingAddress || compactText(existing?.billing_address),
+    shippingAddress: shippingAddress || compactText(existing?.shipping_address) || billingAddress,
+  };
+
+  await conn.query(
+    `INSERT INTO customers
+      (id, name, company, email, phone, gstin, billing_address, shipping_address, is_active)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
+     ON DUPLICATE KEY UPDATE
+       name = VALUES(name),
+       company = VALUES(company),
+       email = VALUES(email),
+       phone = VALUES(phone),
+       gstin = COALESCE(NULLIF(VALUES(gstin), ''), gstin),
+       billing_address = COALESCE(NULLIF(VALUES(billing_address), ''), billing_address),
+       shipping_address = COALESCE(NULLIF(VALUES(shipping_address), ''), shipping_address),
+       is_active = 1`,
+    [
+      customer.id,
+      customer.name,
+      customer.company || null,
+      customer.email || null,
+      customer.phone || null,
+      customer.gstin || null,
+      customer.billingAddress || null,
+      customer.shippingAddress || null,
+    ],
+  );
+
+  return customer;
+}
+
+function createInvoiceDownloadSignature(orderId, owner) {
+  const ownerKind = owner?.userId ? 'user' : 'guest';
+  const ownerValue = compactText(owner?.userId || owner?.guestId);
+  const expiresAt = Date.now() + INVOICE_DOWNLOAD_LINK_TTL_MS;
+  const payload = `${compactText(orderId)}|${ownerKind}|${ownerValue}|${expiresAt}`;
+  const signature = crypto.createHmac('sha256', INVOICE_DOWNLOAD_SECRET).update(payload).digest('hex');
+  return { ownerKind, ownerValue, expiresAt, signature };
+}
+
+function verifyInvoiceDownloadSignature({ orderId, ownerKind, ownerValue, expiresAt, signature }) {
+  const safeKind = compactText(ownerKind);
+  const safeOwner = compactText(ownerValue);
+  const safeSignature = compactText(signature);
+  const safeExpiresAt = parseNumber(expiresAt, 0);
+  if (!compactText(orderId) || !safeOwner || !safeSignature || !['user', 'guest'].includes(safeKind)) {
+    return false;
+  }
+  if (!Number.isFinite(safeExpiresAt) || safeExpiresAt < Date.now()) {
+    return false;
+  }
+  if (safeExpiresAt - Date.now() > INVOICE_DOWNLOAD_LINK_TTL_MS + 60 * 1000) {
+    return false;
+  }
+  const payload = `${compactText(orderId)}|${safeKind}|${safeOwner}|${safeExpiresAt}`;
+  const expected = crypto.createHmac('sha256', INVOICE_DOWNLOAD_SECRET).update(payload).digest('hex');
+  const expectedBuffer = Buffer.from(expected, 'hex');
+  const actualBuffer = Buffer.from(safeSignature, 'hex');
+  if (expectedBuffer.length === 0 || actualBuffer.length !== expectedBuffer.length) {
+    return false;
+  }
+  return crypto.timingSafeEqual(expectedBuffer, actualBuffer);
+}
+
+async function getInvoiceDownloadOwner(req, searchParams, orderId) {
+  const authOwner = await getStorefrontOwner(req, searchParams, null);
+  if (authOwner) {
+    return authOwner;
+  }
+  const ownerKind = compactText(searchParams.get('ownerKind'));
+  const ownerValue = compactText(searchParams.get('ownerValue'));
+  const expiresAt = parseNumber(searchParams.get('expires'), 0);
+  const signature = compactText(searchParams.get('sig'));
+  if (!verifyInvoiceDownloadSignature({ orderId, ownerKind, ownerValue, expiresAt, signature })) {
+    return null;
+  }
+  return ownerKind === 'user'
+    ? { userId: ownerValue, guestId: null }
+    : { userId: null, guestId: ownerValue };
+}
+
+function renderStorefrontInvoiceHtml(order, invoice) {
+  const safeOrder = order || {};
+  const safeInvoice = invoice || {};
+  const lines = Array.isArray(safeInvoice.lines) ? safeInvoice.lines : [];
+  const escape = escapeHtml;
+  const totals = [
+    ['Gross Amount', safeInvoice.subtotal],
+    ['Discount', safeInvoice.discount],
+    ['Taxable Amount', safeInvoice.taxableTotal],
+    ['Included GST', safeInvoice.gstTotal],
+    [Number(safeInvoice.igstTotal || 0) > 0 ? 'IGST' : 'CGST', Number(safeInvoice.igstTotal || 0) > 0 ? safeInvoice.igstTotal : safeInvoice.cgstTotal],
+    [Number(safeInvoice.igstTotal || 0) > 0 ? null : 'SGST', Number(safeInvoice.igstTotal || 0) > 0 ? null : safeInvoice.sgstTotal],
+    ['Delivery', safeInvoice.deliveryFee],
+  ]
+    .filter(entry => entry[0])
+    .map(([label, value]) => `<div class="row"><span>${escape(label)}</span><strong>${escape(formatCurrencyInrForHtml(value))}</strong></div>`)
+    .join('');
+  const lineMarkup = lines
+    .map(
+      line => `
+        <tr>
+          <td>${escape(line.itemName || 'Item')}<div class="sub">${escape(line.description || '')}</div></td>
+          <td>${escape(line.hsnCode || '-')}</td>
+          <td>${escape(String(line.qty || 0))}</td>
+          <td>${escape(formatCurrencyInrForHtml(line.unitPrice || 0))}</td>
+          <td>${escape(String(Number(line.taxRate || 0).toFixed(2)))}%</td>
+          <td>${escape(formatCurrencyInrForHtml(line.taxableValue || 0))}</td>
+          <td>${escape(formatCurrencyInrForHtml(line.gstAmount || 0))}</td>
+          <td>${escape(formatCurrencyInrForHtml(line.lineTotal || 0))}</td>
+        </tr>`,
+    )
+    .join('');
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>${escape(safeInvoice.invoiceNumber || safeOrder.orderNumber || 'Invoice')}</title>
+  <style>
+    body { margin: 0; padding: 24px; font-family: -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; background: #f3f4f6; color: #111827; }
+    .sheet { max-width: 980px; margin: 0 auto; background: #fff; border-radius: 24px; padding: 28px; box-shadow: 0 18px 50px rgba(15,23,42,0.12); }
+    .hero { display:flex; justify-content:space-between; gap:16px; align-items:flex-start; margin-bottom:24px; }
+    .eyebrow { color:#0f766e; font-size:12px; font-weight:800; text-transform:uppercase; letter-spacing:.08em; }
+    h1 { margin:8px 0 4px; font-size:32px; line-height:1.1; }
+    .subhead { color:#475569; font-size:14px; font-weight:600; }
+    .pill { display:inline-flex; align-items:center; padding:8px 14px; border-radius:999px; background:#dbeafe; color:#1d4ed8; font-weight:800; font-size:12px; }
+    .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:12px; margin-bottom:18px; }
+    .card { border:1px solid #e5e7eb; border-radius:18px; padding:16px; background:#fff; }
+    .card h2 { margin:0 0 10px; font-size:12px; text-transform:uppercase; letter-spacing:.06em; color:#64748b; }
+    .card strong { display:block; font-size:16px; margin-bottom:6px; }
+    .card p { margin:4px 0; color:#475569; font-size:13px; line-height:1.5; }
+    table { width:100%; border-collapse:collapse; margin-top:8px; }
+    th, td { border-bottom:1px solid #e5e7eb; padding:12px 10px; text-align:left; vertical-align:top; font-size:13px; }
+    th { color:#64748b; font-size:12px; text-transform:uppercase; letter-spacing:.04em; }
+    .sub { color:#64748b; font-size:12px; margin-top:4px; }
+    .summary { margin-top:20px; display:grid; grid-template-columns:1.3fr .9fr; gap:16px; }
+    .note { border-radius:18px; background:#e0f2fe; padding:16px; color:#0f172a; }
+    .note h3 { margin:0 0 8px; font-size:12px; text-transform:uppercase; letter-spacing:.05em; color:#0c4a6e; }
+    .row { display:flex; justify-content:space-between; gap:14px; padding:8px 0; border-bottom:1px solid #eef2f7; font-size:14px; }
+    .row:last-child { border-bottom:none; }
+    .grand { font-size:18px; font-weight:900; }
+    @media print { body { background:#fff; padding:0; } .sheet { box-shadow:none; border-radius:0; max-width:none; } }
+  </style>
+</head>
+<body>
+  <div class="sheet">
+    <div class="hero">
+      <div>
+        <div class="eyebrow">Order invoice</div>
+        <h1>${escape(safeInvoice.invoiceNumber || safeOrder.orderNumber || 'Invoice')}</h1>
+        <div class="subhead">${escape(safeOrder.orderNumber || '')} ${safeOrder.createdAt ? `• ${escape(String(safeOrder.createdAt))}` : ''}</div>
+      </div>
+      <div class="pill">${escape(safeInvoice.status || safeOrder.status || 'Open')}</div>
+    </div>
+
+    <div class="grid">
+      <div class="card">
+        <h2>Seller</h2>
+        <strong>${escape(safeInvoice.sellerName || 'Seller')}</strong>
+        <p>${escape(safeInvoice.sellerAddress || '-')}</p>
+        <p>GSTIN: ${escape(safeInvoice.sellerGstin || 'Not configured')}</p>
+      </div>
+      <div class="card">
+        <h2>Bill To</h2>
+        <strong>${escape(safeInvoice.billToName || safeInvoice.customerName || 'Customer')}</strong>
+        <p>${escape(safeInvoice.billToAddress || '-')}</p>
+        <p>${escape(safeInvoice.billToPhone || '')}</p>
+        <p>GSTIN: ${escape(safeInvoice.billToGstin || 'Unregistered')}</p>
+      </div>
+      <div class="card">
+        <h2>Supply</h2>
+        <strong>${escape(safeInvoice.placeOfSupply || safeInvoice.sellerState || 'India')}</strong>
+        <p>Ship to: ${escape(safeInvoice.shipToAddress || safeInvoice.billToAddress || '-')}</p>
+        <p>Prices are GST inclusive.</p>
+      </div>
+    </div>
+
+    <table>
+      <thead>
+        <tr>
+          <th>Item</th>
+          <th>HSN</th>
+          <th>Qty</th>
+          <th>Rate</th>
+          <th>GST</th>
+          <th>Taxable</th>
+          <th>GST Included</th>
+          <th>Total</th>
+        </tr>
+      </thead>
+      <tbody>${lineMarkup}</tbody>
+    </table>
+
+    <div class="summary">
+      <div class="note">
+        <h3>Amount in Words</h3>
+        <div>${escape(safeInvoice.amountInWords || '')}</div>
+        <p style="margin-top:12px;">This invoice shows GST already included in the line and payable amounts.</p>
+      </div>
+      <div class="card">
+        <h2>Payment Summary</h2>
+        ${totals}
+        <div class="row grand"><span>Total Amount</span><strong>${escape(formatCurrencyInrForHtml(safeInvoice.total || 0))}</strong></div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>`;
+}
+
+function formatCurrencyInrForHtml(value) {
+  return `Rs ${Number(value || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
+
 function hashToken(token) {
   return crypto.createHash('sha256').update(String(token)).digest('hex');
 }
@@ -1021,6 +1754,90 @@ async function ensureDb() {
           `ALTER TABLE products
            ADD COLUMN technology_option VARCHAR(40) NULL AFTER capacity_ah`,
         );
+      }
+
+      const [invoiceColumnRows] = await conn.query(
+        `SELECT column_name
+         FROM information_schema.columns
+         WHERE table_schema = ?
+           AND table_name = 'invoices'`,
+        [MYSQL_DATABASE],
+      );
+      const invoiceColumnSet = new Set(
+        (Array.isArray(invoiceColumnRows) ? invoiceColumnRows : []).map(row => row.COLUMN_NAME || row.column_name),
+      );
+      const invoiceColumnDefs = [
+        ['order_id', `ALTER TABLE invoices ADD COLUMN order_id VARCHAR(64) NULL AFTER customer_id`],
+        ['subtotal', `ALTER TABLE invoices ADD COLUMN subtotal DECIMAL(14,2) NOT NULL DEFAULT 0.00 AFTER due_date`],
+        ['discount', `ALTER TABLE invoices ADD COLUMN discount DECIMAL(14,2) NOT NULL DEFAULT 0.00 AFTER subtotal`],
+        ['delivery_fee', `ALTER TABLE invoices ADD COLUMN delivery_fee DECIMAL(14,2) NOT NULL DEFAULT 0.00 AFTER discount`],
+        ['taxable_total', `ALTER TABLE invoices ADD COLUMN taxable_total DECIMAL(14,2) NOT NULL DEFAULT 0.00 AFTER delivery_fee`],
+        ['gst_total', `ALTER TABLE invoices ADD COLUMN gst_total DECIMAL(14,2) NOT NULL DEFAULT 0.00 AFTER taxable_total`],
+        ['cgst_total', `ALTER TABLE invoices ADD COLUMN cgst_total DECIMAL(14,2) NOT NULL DEFAULT 0.00 AFTER gst_total`],
+        ['sgst_total', `ALTER TABLE invoices ADD COLUMN sgst_total DECIMAL(14,2) NOT NULL DEFAULT 0.00 AFTER cgst_total`],
+        ['igst_total', `ALTER TABLE invoices ADD COLUMN igst_total DECIMAL(14,2) NOT NULL DEFAULT 0.00 AFTER sgst_total`],
+        ['round_off', `ALTER TABLE invoices ADD COLUMN round_off DECIMAL(14,2) NOT NULL DEFAULT 0.00 AFTER igst_total`],
+        ['bill_to_name', `ALTER TABLE invoices ADD COLUMN bill_to_name VARCHAR(160) NULL AFTER round_off`],
+        ['bill_to_phone', `ALTER TABLE invoices ADD COLUMN bill_to_phone VARCHAR(30) NULL AFTER bill_to_name`],
+        ['bill_to_email', `ALTER TABLE invoices ADD COLUMN bill_to_email VARCHAR(160) NULL AFTER bill_to_phone`],
+        ['bill_to_gstin', `ALTER TABLE invoices ADD COLUMN bill_to_gstin VARCHAR(20) NULL AFTER bill_to_email`],
+        ['bill_to_address', `ALTER TABLE invoices ADD COLUMN bill_to_address TEXT NULL AFTER bill_to_gstin`],
+        ['ship_to_address', `ALTER TABLE invoices ADD COLUMN ship_to_address TEXT NULL AFTER bill_to_address`],
+        ['place_of_supply', `ALTER TABLE invoices ADD COLUMN place_of_supply VARCHAR(160) NULL AFTER ship_to_address`],
+      ];
+      for (const [columnName, ddl] of invoiceColumnDefs) {
+        if (!invoiceColumnSet.has(columnName)) {
+          await conn.query(ddl);
+        }
+      }
+
+      const [invoiceIndexRows] = await conn.query(
+        `SELECT index_name
+         FROM information_schema.statistics
+         WHERE table_schema = ?
+           AND table_name = 'invoices'`,
+        [MYSQL_DATABASE],
+      );
+      const invoiceIndexSet = new Set(
+        (Array.isArray(invoiceIndexRows) ? invoiceIndexRows : []).map(row => row.INDEX_NAME || row.index_name),
+      );
+      if (!invoiceIndexSet.has('uq_invoices_order_id')) {
+        await conn.query(
+          `ALTER TABLE invoices
+           ADD UNIQUE KEY uq_invoices_order_id (order_id)`,
+        );
+      }
+
+      const [invoiceLineColumnRows] = await conn.query(
+        `SELECT column_name
+         FROM information_schema.columns
+         WHERE table_schema = ?
+           AND table_name = 'invoice_lines'`,
+        [MYSQL_DATABASE],
+      );
+      const invoiceLineColumnSet = new Set(
+        (Array.isArray(invoiceLineColumnRows) ? invoiceLineColumnRows : []).map(row => row.COLUMN_NAME || row.column_name),
+      );
+      const invoiceLineDefs = [
+        ['item_name', `ALTER TABLE invoice_lines ADD COLUMN item_name VARCHAR(200) NULL AFTER product_id`],
+        ['description', `ALTER TABLE invoice_lines ADD COLUMN description VARCHAR(255) NULL AFTER item_name`],
+        ['sku', `ALTER TABLE invoice_lines ADD COLUMN sku VARCHAR(120) NULL AFTER description`],
+        ['unit', `ALTER TABLE invoice_lines ADD COLUMN unit VARCHAR(40) NULL AFTER sku`],
+        ['hsn_code', `ALTER TABLE invoice_lines ADD COLUMN hsn_code VARCHAR(40) NULL AFTER unit`],
+        ['tax_rate', `ALTER TABLE invoice_lines ADD COLUMN tax_rate DECIMAL(5,2) NOT NULL DEFAULT 0.00 AFTER unit_price`],
+        ['gross_amount', `ALTER TABLE invoice_lines ADD COLUMN gross_amount DECIMAL(14,2) NOT NULL DEFAULT 0.00 AFTER line_total`],
+        ['discount_amount', `ALTER TABLE invoice_lines ADD COLUMN discount_amount DECIMAL(14,2) NOT NULL DEFAULT 0.00 AFTER gross_amount`],
+        ['net_amount', `ALTER TABLE invoice_lines ADD COLUMN net_amount DECIMAL(14,2) NOT NULL DEFAULT 0.00 AFTER discount_amount`],
+        ['taxable_value', `ALTER TABLE invoice_lines ADD COLUMN taxable_value DECIMAL(14,2) NOT NULL DEFAULT 0.00 AFTER net_amount`],
+        ['gst_amount', `ALTER TABLE invoice_lines ADD COLUMN gst_amount DECIMAL(14,2) NOT NULL DEFAULT 0.00 AFTER taxable_value`],
+        ['cgst_amount', `ALTER TABLE invoice_lines ADD COLUMN cgst_amount DECIMAL(14,2) NOT NULL DEFAULT 0.00 AFTER gst_amount`],
+        ['sgst_amount', `ALTER TABLE invoice_lines ADD COLUMN sgst_amount DECIMAL(14,2) NOT NULL DEFAULT 0.00 AFTER cgst_amount`],
+        ['igst_amount', `ALTER TABLE invoice_lines ADD COLUMN igst_amount DECIMAL(14,2) NOT NULL DEFAULT 0.00 AFTER sgst_amount`],
+      ];
+      for (const [columnName, ddl] of invoiceLineDefs) {
+        if (!invoiceLineColumnSet.has(columnName)) {
+          await conn.query(ddl);
+        }
       }
 
       await conn.query(
@@ -1536,6 +2353,158 @@ async function ensureDb() {
   }
 }
 
+function mapInvoiceLineFromDbRow(row) {
+  return decorateInvoiceLine({
+    id: row.id,
+    itemId: row.item_id || row.product_id,
+    itemName: row.item_name,
+    description: row.description,
+    sku: row.sku,
+    unit: row.unit,
+    hsnCode: row.hsn_code,
+    qty: parseNumber(row.qty, 0),
+    unitPrice: parseNumber(row.unit_price, 0),
+    taxRate: parseNumber(row.tax_rate, 0),
+    grossAmount: parseNumber(row.gross_amount, parseNumber(row.line_total, 0)),
+    discountAmount: parseNumber(row.discount_amount, 0),
+    netAmount: parseNumber(row.net_amount, parseNumber(row.line_total, 0)),
+    taxableValue: parseNumber(row.taxable_value, 0),
+    gstAmount: parseNumber(row.gst_amount, 0),
+    cgstAmount: parseNumber(row.cgst_amount, 0),
+    sgstAmount: parseNumber(row.sgst_amount, 0),
+    igstAmount: parseNumber(row.igst_amount, 0),
+  });
+}
+
+function mapInvoiceFromDbRow(row, lines = []) {
+  return decorateInvoiceDocument({
+    id: row.id,
+    orderId: row.order_id,
+    orderNumber: row.order_number,
+    invoiceNumber: row.invoice_number,
+    customerId: row.customer_id,
+    customerName: row.customer_name,
+    status: row.status,
+    dueDate: toYmd(row.due_date),
+    total: parseNumber(row.total, 0),
+    createdAt: toIso(row.created_at),
+    paidAt: row.paid_at ? toIso(row.paid_at) : '',
+    subtotal: parseNumber(row.subtotal, 0),
+    discount: parseNumber(row.discount, 0),
+    deliveryFee: parseNumber(row.delivery_fee, 0),
+    taxableTotal: parseNumber(row.taxable_total, 0),
+    gstTotal: parseNumber(row.gst_total, 0),
+    cgstTotal: parseNumber(row.cgst_total, 0),
+    sgstTotal: parseNumber(row.sgst_total, 0),
+    igstTotal: parseNumber(row.igst_total, 0),
+    roundOff: parseNumber(row.round_off, 0),
+    billToName: row.bill_to_name,
+    billToPhone: row.bill_to_phone,
+    billToEmail: row.bill_to_email,
+    billToGstin: row.bill_to_gstin,
+    billToAddress: row.bill_to_address,
+    shipToAddress: row.ship_to_address,
+    placeOfSupply: row.place_of_supply,
+    lines,
+  });
+}
+
+function buildSqlPlaceholders(values) {
+  return (Array.isArray(values) ? values : []).map(() => '?').join(', ');
+}
+
+async function fetchInvoicesByOrderIds(conn, orderIds) {
+  const safeOrderIds = Array.from(new Set((Array.isArray(orderIds) ? orderIds : []).map(compactText).filter(Boolean)));
+  if (safeOrderIds.length === 0) {
+    return new Map();
+  }
+
+  const [invoiceRows] = await conn.query(
+    `SELECT i.id,
+            i.order_id,
+            co.order_number,
+            i.invoice_number,
+            i.customer_id,
+            i.status,
+            i.due_date,
+            i.total,
+            i.created_at,
+            i.paid_at,
+            i.subtotal,
+            i.discount,
+            i.delivery_fee,
+            i.taxable_total,
+            i.gst_total,
+            i.cgst_total,
+            i.sgst_total,
+            i.igst_total,
+            i.round_off,
+            i.bill_to_name,
+            i.bill_to_phone,
+            i.bill_to_email,
+            i.bill_to_gstin,
+            i.bill_to_address,
+            i.ship_to_address,
+            i.place_of_supply,
+            COALESCE(c.name, i.bill_to_name, '') AS customer_name
+     FROM invoices i
+     LEFT JOIN customers c ON c.id = i.customer_id
+     LEFT JOIN customer_orders co ON co.id = i.order_id
+     WHERE i.order_id IN (${buildSqlPlaceholders(safeOrderIds)})
+     ORDER BY i.created_at DESC`,
+    safeOrderIds,
+  );
+  const invoiceData = Array.isArray(invoiceRows) ? invoiceRows : [];
+  const invoiceIds = invoiceData.map(row => row.id).filter(Boolean);
+  let invoiceLineData = [];
+  if (invoiceIds.length > 0) {
+    const [lineRows] = await conn.query(
+      `SELECT il.id,
+              il.invoice_id,
+              il.product_id AS item_id,
+              COALESCE(NULLIF(il.item_name, ''), COALESCE(p.name, 'Unknown Item')) AS item_name,
+              COALESCE(NULLIF(il.description, ''), COALESCE(p.name, 'Unknown Item')) AS description,
+              COALESCE(NULLIF(il.sku, ''), COALESCE(p.sku, '')) AS sku,
+              COALESCE(NULLIF(il.unit, ''), COALESCE(p.unit, 'pcs')) AS unit,
+              COALESCE(NULLIF(il.hsn_code, ''), COALESCE(p.hsn_code, '')) AS hsn_code,
+              il.qty,
+              il.unit_price,
+              CASE
+                WHEN il.tax_rate > 0 THEN il.tax_rate
+                ELSE COALESCE(p.tax_rate, 0)
+              END AS tax_rate,
+              il.line_total,
+              il.gross_amount,
+              il.discount_amount,
+              il.net_amount,
+              il.taxable_value,
+              il.gst_amount,
+              il.cgst_amount,
+              il.sgst_amount,
+              il.igst_amount
+       FROM invoice_lines il
+       LEFT JOIN products p ON p.id = il.product_id
+       WHERE il.invoice_id IN (${buildSqlPlaceholders(invoiceIds)})
+       ORDER BY il.invoice_id, il.id`,
+      invoiceIds,
+    );
+    invoiceLineData = Array.isArray(lineRows) ? lineRows : [];
+  }
+
+  const invoiceLinesByInvoice = new Map();
+  for (const row of invoiceLineData) {
+    const lines = invoiceLinesByInvoice.get(row.invoice_id) || [];
+    lines.push(mapInvoiceLineFromDbRow(row));
+    invoiceLinesByInvoice.set(row.invoice_id, lines);
+  }
+
+  const invoicesByOrder = new Map();
+  for (const row of invoiceData) {
+    invoicesByOrder.set(row.order_id, mapInvoiceFromDbRow(row, invoiceLinesByInvoice.get(row.id) || []));
+  }
+  return invoicesByOrder;
+}
+
 async function readDb() {
   await ensureDb();
 
@@ -1649,21 +2618,62 @@ async function readDb() {
        ORDER BY bl.bill_id`,
     ),
     mysqlPool.query(
-      `SELECT i.id, i.invoice_number, i.customer_id, i.status, i.due_date, i.total, i.created_at, i.paid_at,
-              COALESCE(c.name, '') AS customer_name
+      `SELECT i.id,
+              i.order_id,
+              co.order_number,
+              i.invoice_number,
+              i.customer_id,
+              i.status,
+              i.due_date,
+              i.total,
+              i.created_at,
+              i.paid_at,
+              i.subtotal,
+              i.discount,
+              i.delivery_fee,
+              i.taxable_total,
+              i.gst_total,
+              i.cgst_total,
+              i.sgst_total,
+              i.igst_total,
+              i.round_off,
+              i.bill_to_name,
+              i.bill_to_phone,
+              i.bill_to_email,
+              i.bill_to_gstin,
+              i.bill_to_address,
+              i.ship_to_address,
+              i.place_of_supply,
+              COALESCE(c.name, i.bill_to_name, '') AS customer_name
        FROM invoices i
        LEFT JOIN customers c ON c.id = i.customer_id
+       LEFT JOIN customer_orders co ON co.id = i.order_id
        ORDER BY i.created_at DESC`,
     ),
     mysqlPool.query(
-      `SELECT il.invoice_id,
+      `SELECT il.id,
+              il.invoice_id,
               il.product_id AS item_id,
-              COALESCE(p.name, 'Unknown Item') AS item_name,
-              COALESCE(p.sku, '') AS sku,
-              COALESCE(p.unit, 'pcs') AS unit,
+              COALESCE(NULLIF(il.item_name, ''), COALESCE(p.name, 'Unknown Item')) AS item_name,
+              COALESCE(NULLIF(il.description, ''), COALESCE(p.name, 'Unknown Item')) AS description,
+              COALESCE(NULLIF(il.sku, ''), COALESCE(p.sku, '')) AS sku,
+              COALESCE(NULLIF(il.unit, ''), COALESCE(p.unit, 'pcs')) AS unit,
+              COALESCE(NULLIF(il.hsn_code, ''), COALESCE(p.hsn_code, '')) AS hsn_code,
               il.qty,
               il.unit_price,
-              il.line_total
+              CASE
+                WHEN il.tax_rate > 0 THEN il.tax_rate
+                ELSE COALESCE(p.tax_rate, 0)
+              END AS tax_rate,
+              il.line_total,
+              il.gross_amount,
+              il.discount_amount,
+              il.net_amount,
+              il.taxable_value,
+              il.gst_amount,
+              il.cgst_amount,
+              il.sgst_amount,
+              il.igst_amount
        FROM invoice_lines il
        LEFT JOIN products p ON p.id = il.product_id
        ORDER BY il.invoice_id`,
@@ -1864,15 +2874,7 @@ async function readDb() {
   const invoiceLinesByInvoice = new Map();
   for (const row of invoiceLineData) {
     const lines = invoiceLinesByInvoice.get(row.invoice_id) || [];
-    lines.push({
-      itemId: row.item_id,
-      itemName: row.item_name,
-      sku: row.sku,
-      unit: row.unit,
-      qty: parseNumber(row.qty, 0),
-      unitPrice: parseNumber(row.unit_price, 0),
-      lineTotal: parseNumber(row.line_total, 0),
-    });
+    lines.push(mapInvoiceLineFromDbRow(row));
     invoiceLinesByInvoice.set(row.invoice_id, lines);
   }
 
@@ -1912,18 +2914,7 @@ async function readDb() {
     lines: billLinesByBill.get(row.id) || [],
   }));
 
-  const invoices = invoiceData.map(row => ({
-    id: row.id,
-    invoiceNumber: row.invoice_number,
-    customerId: row.customer_id,
-    customerName: row.customer_name,
-    status: row.status,
-    dueDate: toYmd(row.due_date),
-    total: parseNumber(row.total, 0),
-    createdAt: toIso(row.created_at),
-    paidAt: row.paid_at ? toIso(row.paid_at) : undefined,
-    lines: invoiceLinesByInvoice.get(row.id) || [],
-  }));
+  const invoices = invoiceData.map(row => mapInvoiceFromDbRow(row, invoiceLinesByInvoice.get(row.id) || []));
 
   const counters = { po: 1, so: 1, bill: 1, inv: 1 };
   for (const row of counterData) {
@@ -2272,14 +3263,33 @@ function writeDb(db) {
         if (!invoice.customerId) continue;
         await conn.query(
           `INSERT INTO invoices
-             (id, invoice_number, customer_id, status, due_date, total, created_by, created_at, paid_at)
-           VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?)`,
+             (id, order_id, invoice_number, customer_id, status, due_date, subtotal, discount, delivery_fee, taxable_total,
+              gst_total, cgst_total, sgst_total, igst_total, round_off, bill_to_name, bill_to_phone, bill_to_email,
+              bill_to_gstin, bill_to_address, ship_to_address, place_of_supply, total, created_by, created_at, paid_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)`,
           [
             invoice.id,
+            compactText(invoice.orderId) || null,
             invoice.invoiceNumber,
             invoice.customerId,
             invoice.status || 'Open',
             toMysqlDate(invoice.dueDate),
+            parseNumber(invoice.subtotal, 0),
+            parseNumber(invoice.discount, 0),
+            parseNumber(invoice.deliveryFee, 0),
+            parseNumber(invoice.taxableTotal, 0),
+            parseNumber(invoice.gstTotal, 0),
+            parseNumber(invoice.cgstTotal, 0),
+            parseNumber(invoice.sgstTotal, 0),
+            parseNumber(invoice.igstTotal, 0),
+            parseNumber(invoice.roundOff, 0),
+            compactText(invoice.billToName) || compactText(invoice.customerName) || null,
+            compactText(invoice.billToPhone) || null,
+            compactText(invoice.billToEmail) || null,
+            compactText(invoice.billToGstin) || null,
+            compactText(invoice.billToAddress) || null,
+            compactText(invoice.shipToAddress) || null,
+            compactText(invoice.placeOfSupply) || null,
             parseNumber(invoice.total, 0),
             toMysqlDateTime(invoice.createdAt),
             toMysqlDateTime(invoice.paidAt),
@@ -2291,14 +3301,29 @@ function writeDb(db) {
           if (!line.itemId) continue;
           await conn.query(
             `INSERT INTO invoice_lines
-              (id, invoice_id, product_id, qty, unit_price)
-             VALUES (?, ?, ?, ?, ?)`,
+              (id, invoice_id, product_id, item_name, description, sku, unit, hsn_code, qty, unit_price, tax_rate,
+               gross_amount, discount_amount, net_amount, taxable_value, gst_amount, cgst_amount, sgst_amount, igst_amount)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             [
-              `il_${invoice.id}_${i + 1}`,
+              compactText(line.id) || `il_${invoice.id}_${i + 1}`,
               invoice.id,
               line.itemId,
+              compactText(line.itemName) || 'Item',
+              compactText(line.description) || compactText(line.itemName) || 'Item',
+              compactText(line.sku) || null,
+              compactText(line.unit) || 'pcs',
+              compactText(line.hsnCode) || null,
               parseNumber(line.qty, 0),
               parseNumber(line.unitPrice, 0),
+              parseNumber(line.taxRate, 0),
+              parseNumber(line.grossAmount, parseNumber(line.lineTotal, 0)),
+              parseNumber(line.discountAmount, 0),
+              parseNumber(line.netAmount, parseNumber(line.lineTotal, 0)),
+              parseNumber(line.taxableValue, 0),
+              parseNumber(line.gstAmount, 0),
+              parseNumber(line.cgstAmount, 0),
+              parseNumber(line.sgstAmount, 0),
+              parseNumber(line.igstAmount, 0),
             ],
           );
         }
@@ -2783,17 +3808,18 @@ function getFallbackThumbnail() {
   return 'https://dummyimage.com/240x160/e6ece2/1f2937.png&text=Product';
 }
 
-function toProfileOrder(row, req = null) {
+function toProfileOrderItemPreview(row, req = null) {
   return {
-    id: row.order_item_id || row.order_number || row.id,
-    createdAt: toYmd(row.placed_at || row.created_at),
-    itemCount: Math.max(1, parseNumber(row.qty, parseNumber(row.item_count, 1))),
-    total: parseNumber(row.total, 0),
-    status: row.status || 'Processing',
+    id: row.order_item_id || `${row.order_id}_${row.product_id || 'item'}`,
     productId: row.product_id || null,
+    name: row.product_name || 'Product',
     brand: row.brand || '',
     category: row.category || '',
     model: row.model || row.order_item_model || row.product_name || '',
+    capacity: row.order_item_capacity || row.capacity || '',
+    qty: Math.max(1, parseNumber(row.qty, 1)),
+    unitPrice: parseNumber(row.unit_price, 0),
+    lineTotal: clamp2(parseNumber(row.unit_price, 0) * Math.max(1, parseNumber(row.qty, 1))),
     thumbnail: resolveAssetUrl(req, row.thumbnail || getFallbackThumbnail()),
   };
 }
@@ -2871,19 +3897,26 @@ async function fetchCartItemsByCartId(conn, cartId, req = null) {
   }));
 }
 
-async function fetchOrdersByOwner(conn, owner, req = null) {
+async function fetchOrdersByOwner(conn, owner, req = null, options = {}) {
   const ownerWhere = buildOwnerCondition(owner);
+  const filterSql = compactText(options.orderId) ? ' AND co.id = ?' : '';
+  const filterParams = compactText(options.orderId) ? [compactText(options.orderId)] : [];
   const [rows] = await conn.query(
-    `SELECT co.id,
+    `SELECT co.id AS order_id,
             co.order_number,
             co.status,
             co.placed_at,
             co.created_at,
             co.total,
+            co.subtotal,
+            co.discount,
+            co.delivery_fee,
             coi.id AS order_item_id,
             coi.product_id,
             coi.product_name,
             coi.model AS order_item_model,
+            coi.capacity AS order_item_capacity,
+            coi.unit_price,
             coi.qty,
             CASE
               WHEN LOWER(TRIM(COALESCE(p.brand, ''))) = 'general' THEN ''
@@ -2902,10 +3935,48 @@ async function fetchOrdersByOwner(conn, owner, req = null) {
        ON pi.product_id = coi.product_id
       AND pi.is_primary = 1
      WHERE ${ownerWhere.sql}
+       ${filterSql}
      ORDER BY co.placed_at DESC, co.created_at DESC, co.id DESC, coi.id DESC`,
-    ownerWhere.params,
+    [...ownerWhere.params, ...filterParams],
   );
-  return (Array.isArray(rows) ? rows : []).map(row => toProfileOrder(row, req));
+  const orderRows = Array.isArray(rows) ? rows : [];
+  if (orderRows.length === 0) {
+    return [];
+  }
+
+  const invoicesByOrder = await fetchInvoicesByOrderIds(
+    conn,
+    orderRows.map(row => row.order_id),
+  );
+  const groupedOrders = new Map();
+  for (const row of orderRows) {
+    let order = groupedOrders.get(row.order_id);
+    if (!order) {
+      order = {
+        id: row.order_id,
+        orderNumber: row.order_number || row.order_id,
+        createdAt: toYmd(row.placed_at || row.created_at),
+        itemCount: 0,
+        total: parseNumber(row.total, 0),
+        subtotal: parseNumber(row.subtotal, 0),
+        discount: parseNumber(row.discount, 0),
+        deliveryFee: parseNumber(row.delivery_fee, 0),
+        status: row.status || 'Processing',
+        productId: row.product_id || null,
+        brand: row.brand || '',
+        category: row.category || '',
+        model: row.model || row.order_item_model || row.product_name || '',
+        thumbnail: resolveAssetUrl(req, row.thumbnail || getFallbackThumbnail()),
+        items: [],
+        invoice: invoicesByOrder.get(row.order_id) || null,
+      };
+      groupedOrders.set(row.order_id, order);
+    }
+    const previewItem = toProfileOrderItemPreview(row, req);
+    order.itemCount += previewItem.qty;
+    order.items.push(previewItem);
+  }
+  return Array.from(groupedOrders.values());
 }
 
 async function fetchWishlistIds(conn, userId) {
@@ -3178,8 +4249,13 @@ function extractItemSummary(db, itemId) {
   return {
     itemId: item.id,
     itemName: item.name,
+    description: joinNonEmpty([item.name, item.model, item.capacityAh], ' • ') || item.name,
+    model: item.model || '',
+    capacity: item.capacityAh || '',
     sku: item.sku,
     unit: item.unit,
+    hsnCode: item.hsnCode || '',
+    taxRate: parseNumber(item.taxRate, 0),
   };
 }
 
@@ -3385,9 +4461,9 @@ const server = http.createServer(async (req, res) => {
                 baseKey,
             )
             .map(p => normalizeCapacityAh(p.capacityAh))
-            .filter(cap => AH_OPTIONS.includes(cap)),
+            .filter(Boolean),
         ),
-      );
+      ).sort(compareCapacityAh);
       const purchasePrice = parseNumber(item.purchasePrice, 0);
       const sellingPrice = parseNumber(item.sellingPrice, 0);
       const discountPct =
@@ -3888,6 +4964,10 @@ const server = http.createServer(async (req, res) => {
                   ci.qty,
                   COALESCE(p.name, 'Product') AS product_name,
                   COALESCE(NULLIF(p.model, ''), p.sku, '') AS product_model,
+                  COALESCE(p.sku, '') AS sku,
+                  COALESCE(p.unit, 'pcs') AS unit,
+                  COALESCE(p.hsn_code, '') AS hsn_code,
+                  COALESCE(p.tax_rate, 0) AS tax_rate,
                   p.qty_on_hand
            FROM cart_items ci
            LEFT JOIN products p ON p.id = ci.product_id
@@ -3936,13 +5016,49 @@ const server = http.createServer(async (req, res) => {
           Array.isArray(locationRows) && locationRows[0]
             ? locationRows[0].current_location_id || null
             : null;
+        let deliveryLocation = null;
+        if (locationId) {
+          const [deliveryRows] = await conn.query(
+            `SELECT id, label, area, city, state, country, pincode, lat, lng, source, updated_at
+             FROM locations
+             WHERE id = ?
+             LIMIT 1`,
+            [locationId],
+          );
+          const locationRow = Array.isArray(deliveryRows) ? deliveryRows[0] || null : null;
+          if (locationRow) {
+            deliveryLocation = normalizeLocation({
+              id: locationRow.id,
+              label: locationRow.label,
+              area: locationRow.area,
+              city: locationRow.city,
+              state: locationRow.state,
+              country: locationRow.country,
+              pincode: locationRow.pincode,
+              lat: locationRow.lat != null ? Number(locationRow.lat) : null,
+              lng: locationRow.lng != null ? Number(locationRow.lng) : null,
+              source: locationRow.source,
+              updatedAt: toIso(locationRow.updated_at),
+            });
+          }
+        }
+        const shippingAddress = buildLocationAddress(deliveryLocation);
+        const customer = await ensureStorefrontCustomer(conn, owner, {
+          firstName: body.firstName,
+          lastName: body.lastName,
+          phone: body.phone,
+          email: body.email,
+          billingAddress: shippingAddress,
+          shippingAddress,
+        });
 
         const orderId = `ord_${crypto.randomUUID().slice(0, 8)}`;
         const orderNumber = `ORD-${Date.now().toString().slice(-8)}-${Math.floor(Math.random() * 900 + 100)}`;
+        const placedAt = new Date();
         await conn.query(
           `INSERT INTO customer_orders
-            (id, order_number, user_id, guest_id, location_id, status, subtotal, discount, delivery_fee, total)
-           VALUES (?, ?, ?, ?, ?, 'Processing', ?, ?, ?, ?)`,
+            (id, order_number, user_id, guest_id, location_id, status, subtotal, discount, delivery_fee, total, placed_at, created_at)
+           VALUES (?, ?, ?, ?, ?, 'Processing', ?, ?, ?, ?, ?, ?)`,
           [
             orderId,
             orderNumber,
@@ -3953,12 +5069,18 @@ const server = http.createServer(async (req, res) => {
             discount,
             deliveryFee,
             total,
+            placedAt,
+            placedAt,
           ],
         );
 
+        const invoiceLineDrafts = [];
         for (const row of lines) {
           const unitPrice = parseNumber(row.unit_price, 0);
           const qty = parseNumber(row.qty, 0);
+          const productName = row.product_name || 'Product';
+          const productModel = row.product_model || '';
+          const capacity = row.capacity || '150Ah';
           await conn.query(
             `INSERT INTO customer_order_items
               (id, order_id, product_id, product_name, model, capacity, unit_price, qty)
@@ -3967,13 +5089,25 @@ const server = http.createServer(async (req, res) => {
               `coi_${crypto.randomUUID().slice(0, 8)}`,
               orderId,
               row.product_id,
-              row.product_name || 'Product',
-              row.product_model || '',
-              row.capacity || '150Ah',
+              productName,
+              productModel,
+              capacity,
               unitPrice,
               qty,
             ],
           );
+          invoiceLineDrafts.push({
+            id: `il_${crypto.randomUUID().slice(0, 8)}`,
+            itemId: row.product_id,
+            itemName: productName,
+            description: joinNonEmpty([productName, productModel, capacity], ' • ') || productName,
+            sku: row.sku || '',
+            unit: row.unit || 'pcs',
+            hsnCode: row.hsn_code || '',
+            qty,
+            unitPrice,
+            taxRate: parseNumber(row.tax_rate, 0),
+          });
           await conn.query(
             `UPDATE products
              SET qty_on_hand = qty_on_hand - ?
@@ -3995,6 +5129,94 @@ const server = http.createServer(async (req, res) => {
           );
         }
 
+        const invoiceId = `invdoc_${crypto.randomUUID().slice(0, 8)}`;
+        const invoiceNumber = await reserveDocumentNumber(conn, 'INV', 'INV');
+        const invoice = buildInvoiceDocument({
+          id: invoiceId,
+          orderId,
+          orderNumber,
+          invoiceNumber,
+          customerId: customer.id,
+          customerName: customer.name,
+          status: 'Open',
+          dueDate: toYmd(placedAt),
+          createdAt: placedAt.toISOString(),
+          subtotal,
+          discount,
+          deliveryFee,
+          billToName: customer.name,
+          billToPhone: customer.phone,
+          billToEmail: customer.email,
+          billToGstin: customer.gstin,
+          billToAddress: customer.billingAddress || shippingAddress,
+          shipToAddress: customer.shippingAddress || shippingAddress || customer.billingAddress,
+          placeOfSupply: formatPlaceOfSupply(deliveryLocation, customer.shippingAddress || shippingAddress),
+          placeOfSupplyState: deliveryLocation?.state || '',
+          lines: invoiceLineDrafts,
+        });
+        await conn.query(
+          `INSERT INTO invoices
+            (id, order_id, invoice_number, customer_id, status, due_date, subtotal, discount, delivery_fee, taxable_total,
+             gst_total, cgst_total, sgst_total, igst_total, round_off, bill_to_name, bill_to_phone, bill_to_email,
+             bill_to_gstin, bill_to_address, ship_to_address, place_of_supply, total, created_by, created_at, paid_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, NULL)`,
+          [
+            invoice.id,
+            orderId,
+            invoice.invoiceNumber,
+            invoice.customerId,
+            invoice.status || 'Open',
+            toMysqlDate(invoice.dueDate),
+            invoice.subtotal,
+            invoice.discount,
+            invoice.deliveryFee,
+            invoice.taxableTotal,
+            invoice.gstTotal,
+            invoice.cgstTotal,
+            invoice.sgstTotal,
+            invoice.igstTotal,
+            invoice.roundOff,
+            invoice.billToName,
+            invoice.billToPhone || null,
+            invoice.billToEmail || null,
+            invoice.billToGstin || null,
+            invoice.billToAddress || null,
+            invoice.shipToAddress || null,
+            invoice.placeOfSupply || null,
+            invoice.total,
+            placedAt,
+          ],
+        );
+        for (const line of invoice.lines) {
+          await conn.query(
+            `INSERT INTO invoice_lines
+              (id, invoice_id, product_id, item_name, description, sku, unit, hsn_code, qty, unit_price, tax_rate,
+               gross_amount, discount_amount, net_amount, taxable_value, gst_amount, cgst_amount, sgst_amount, igst_amount)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [
+              line.id,
+              invoice.id,
+              line.itemId,
+              line.itemName,
+              line.description,
+              line.sku || null,
+              line.unit || 'pcs',
+              line.hsnCode || null,
+              line.qty,
+              line.unitPrice,
+              line.taxRate,
+              line.grossAmount,
+              line.discountAmount,
+              line.netAmount,
+              line.taxableValue,
+              line.gstAmount,
+              line.cgstAmount,
+              line.sgstAmount,
+              line.igstAmount,
+            ],
+          );
+        }
+
         await conn.query(`DELETE FROM cart_items WHERE cart_id = ?`, [cart.id]);
         await conn.query(
           `UPDATE carts
@@ -4008,20 +5230,67 @@ const server = http.createServer(async (req, res) => {
           fetchCartItemsByCartId(conn, cart.id, req),
         ]);
 
-        const itemCount = lines.reduce((sum, row) => sum + parseNumber(row.qty, 0), 0);
-        const order = {
-          id: orderNumber,
-          createdAt: toYmd(new Date()),
-          itemCount,
-          total,
-          status: 'Processing',
-        };
+        const order = orders.find(entry => entry.id === orderId) || null;
 
         await conn.commit();
         sendJson(res, 201, { order, orders, cartItems });
       } catch (error) {
         await conn.rollback();
         throw error;
+      } finally {
+        conn.release();
+      }
+      return;
+    }
+
+    const storefrontInvoiceLinkOrderId = getPathAction(pathname, '/api/public/storefront/orders', 'invoice-link');
+    if (storefrontInvoiceLinkOrderId && req.method === 'GET') {
+      const owner = await getStorefrontOwner(req, searchParams, null);
+      if (!owner) {
+        sendError(res, 400, 'guestId is required for anonymous users');
+        return;
+      }
+      const conn = await mysqlPool.getConnection();
+      try {
+        const orders = await fetchOrdersByOwner(conn, owner, req, { orderId: storefrontInvoiceLinkOrderId });
+        const order = Array.isArray(orders) ? orders[0] || null : null;
+        if (!order || !order.invoice) {
+          sendError(res, 404, 'Invoice not found for this order');
+          return;
+        }
+        const signed = createInvoiceDownloadSignature(order.id, owner);
+        const url = new URL(`${getRequestBaseUrl(req)}/api/public/storefront/orders/${encodeURIComponent(order.id)}/invoice-download`);
+        url.searchParams.set('ownerKind', signed.ownerKind);
+        url.searchParams.set('ownerValue', signed.ownerValue);
+        url.searchParams.set('expires', String(signed.expiresAt));
+        url.searchParams.set('sig', signed.signature);
+        sendJson(res, 200, { downloadUrl: url.toString(), invoiceNumber: order.invoice.invoiceNumber });
+      } finally {
+        conn.release();
+      }
+      return;
+    }
+
+    const storefrontInvoiceDownloadOrderId = getPathAction(pathname, '/api/public/storefront/orders', 'invoice-download');
+    if (storefrontInvoiceDownloadOrderId && req.method === 'GET') {
+      const owner = await getInvoiceDownloadOwner(req, searchParams, storefrontInvoiceDownloadOrderId);
+      if (!owner) {
+        sendError(res, 401, 'Unauthorized invoice download');
+        return;
+      }
+      const conn = await mysqlPool.getConnection();
+      try {
+        const orders = await fetchOrdersByOwner(conn, owner, req, { orderId: storefrontInvoiceDownloadOrderId });
+        const order = Array.isArray(orders) ? orders[0] || null : null;
+        if (!order || !order.invoice) {
+          sendError(res, 404, 'Invoice not found for this order');
+          return;
+        }
+        const html = renderStorefrontInvoiceHtml(order, order.invoice);
+        const safeName = sanitizeFilePart(order.invoice.invoiceNumber || order.orderNumber || 'invoice');
+        sendHtml(res, 200, html, {
+          'Content-Disposition': `attachment; filename="${safeName}.html"`,
+        });
       } finally {
         conn.release();
       }
@@ -5022,33 +6291,42 @@ const server = http.createServer(async (req, res) => {
         return;
       }
 
+      const invoiceNumber = `INV-${String(db.counters.inv).padStart(4, '0')}`;
+
       appendMovement(db, {
         itemId,
         delta: -qty,
         type: 'INVOICE_SALE',
         reason: `Invoice to ${customer.name}`,
-        reference: `INV-${String(db.counters.inv).padStart(4, '0')}`,
+        reference: invoiceNumber,
       });
 
-      const total = clamp2(qty * unitPrice);
-      const invoice = {
+      const invoice = buildInvoiceDocument({
         id: `invdoc_${crypto.randomUUID().slice(0, 8)}`,
-        invoiceNumber: `INV-${String(db.counters.inv).padStart(4, '0')}`,
+        invoiceNumber,
         customerId,
         customerName: customer.name,
         status: 'Open',
         dueDate: String(body.dueDate || ''),
+        createdAt: new Date().toISOString(),
+        subtotal: clamp2(qty * unitPrice),
+        discount: 0,
+        deliveryFee: 0,
+        billToName: customer.name,
+        billToPhone: customer.phone,
+        billToEmail: customer.email,
+        billToGstin: customer.gstin,
+        billToAddress: customer.billingAddress,
+        shipToAddress: customer.shippingAddress || customer.billingAddress,
+        placeOfSupply: formatPlaceOfSupply(null, customer.shippingAddress || customer.billingAddress),
         lines: [
           {
             ...itemSummary,
             qty,
             unitPrice,
-            lineTotal: total,
           },
         ],
-        total,
-        createdAt: new Date().toISOString(),
-      };
+      });
 
       db.counters.inv += 1;
       db.invoices.unshift(invoice);

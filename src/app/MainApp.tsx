@@ -58,6 +58,7 @@ import type {
   DeliveryLocation,
   Doc,
   FeedbackOrderItem,
+  InvoiceDetail,
   Item,
   ItemTechnologyOption,
   LandingCategory,
@@ -199,6 +200,232 @@ function toFetchError(url: string, err: unknown, fallback = 'Request failed') {
   return new Error(`${message} [${url}]`);
 }
 
+function formatCurrency(value: number) {
+  const amount = Number(value || 0);
+  return `₹${amount.toLocaleString('en-IN', {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  })}`;
+}
+
+function formatDisplayDate(value?: string) {
+  const raw = String(value || '').trim();
+  if (!raw) {
+    return '-';
+  }
+  const dt = new Date(raw);
+  if (Number.isNaN(dt.getTime())) {
+    return raw;
+  }
+  return dt.toLocaleDateString('en-IN', {
+    day: '2-digit',
+    month: 'short',
+    year: 'numeric',
+  });
+}
+
+function getInvoiceStatusColors(status: string) {
+  const normalized = String(status || '').trim().toLowerCase();
+  if (normalized === 'paid') {
+    return { bg: '#DCFCE7', text: '#166534' };
+  }
+  if (normalized === 'cancelled') {
+    return { bg: '#FEE2E2', text: '#B91C1C' };
+  }
+  return { bg: '#DBEAFE', text: '#1D4ED8' };
+}
+
+function toFiniteNumber(value: unknown, fallback = 0) {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : fallback;
+}
+
+function toOptionalText(value: unknown) {
+  const normalized = String(value ?? '').trim();
+  return normalized || undefined;
+}
+
+function normalizeComparableText(value: unknown) {
+  return String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function formatDisplayOrderCode(value: unknown) {
+  const normalized = String(value || '').trim();
+  return normalized ? normalized.toUpperCase() : '-';
+}
+
+function buildOrderItemMetaText(title: unknown, model: unknown, capacity: unknown) {
+  const titleText = String(title || '').trim();
+  const modelText = String(model || '').trim();
+  const capacityText = String(capacity || '').trim();
+  const titleNormalized = normalizeComparableText(titleText);
+  const modelNormalized = normalizeComparableText(modelText);
+  const capacityNormalized = normalizeComparableText(capacityText);
+  const parts: string[] = [];
+
+  if (
+    modelText &&
+    modelNormalized &&
+    modelNormalized !== titleNormalized &&
+    !titleNormalized.includes(modelNormalized) &&
+    !modelNormalized.includes(titleNormalized)
+  ) {
+    parts.push(modelText);
+  }
+  if (
+    capacityText &&
+    capacityNormalized &&
+    capacityNormalized !== titleNormalized &&
+    !titleNormalized.includes(capacityNormalized) &&
+    (!modelNormalized || !modelNormalized.includes(capacityNormalized))
+  ) {
+    parts.push(capacityText);
+  }
+
+  return parts.join(' • ');
+}
+
+function normalizeOrderStatus(value: unknown): ProfileOrder['status'] {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (normalized === 'delivered') {
+    return 'Delivered';
+  }
+  if (normalized === 'cancelled') {
+    return 'Cancelled';
+  }
+  return 'Processing';
+}
+
+function normalizeProfileOrderItem(
+  value: Partial<ProfileOrder['items'][number]> | null | undefined,
+  index: number,
+): ProfileOrder['items'][number] {
+  const qty = Math.max(1, Math.round(toFiniteNumber(value?.qty, 1)));
+  const unitPrice = toFiniteNumber(value?.unitPrice, 0);
+  return {
+    id: String(value?.id || value?.productId || `order_item_${index + 1}`),
+    productId: toOptionalText(value?.productId) || null,
+    name: String(value?.name || 'Product'),
+    brand: String(value?.brand || ''),
+    category: String(value?.category || ''),
+    model: String(value?.model || ''),
+    capacity: String(value?.capacity || ''),
+    qty,
+    unitPrice,
+    lineTotal: toFiniteNumber(value?.lineTotal, unitPrice * qty),
+    thumbnail: String(value?.thumbnail || ''),
+  };
+}
+
+function normalizeInvoiceDetail(
+  value: ProfileOrder['invoice'] | Partial<InvoiceDetail> | null | undefined,
+  fallbackOrder?: Partial<ProfileOrder>,
+): InvoiceDetail | null {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+
+  const raw = value as Partial<InvoiceDetail>;
+  return {
+    ...(raw as InvoiceDetail),
+    id: String(raw.id || raw.orderId || fallbackOrder?.id || ''),
+    orderId: toOptionalText(raw.orderId) || toOptionalText(fallbackOrder?.id),
+    orderNumber: toOptionalText(raw.orderNumber) || toOptionalText(fallbackOrder?.orderNumber),
+    invoiceNumber: String(raw.invoiceNumber || ''),
+    customerId: toOptionalText(raw.customerId),
+    customerName: toOptionalText(raw.customerName),
+    status: String(raw.status || 'Open'),
+    dueDate: toOptionalText(raw.dueDate),
+    total: toFiniteNumber(raw.total, toFiniteNumber(fallbackOrder?.total, 0)),
+    createdAt: String(raw.createdAt || fallbackOrder?.createdAt || ''),
+    paidAt: toOptionalText(raw.paidAt),
+    subtotal: toFiniteNumber(raw.subtotal, toFiniteNumber(fallbackOrder?.subtotal, toFiniteNumber(fallbackOrder?.total, 0))),
+    discount: toFiniteNumber(raw.discount, toFiniteNumber(fallbackOrder?.discount, 0)),
+    deliveryFee: toFiniteNumber(raw.deliveryFee, toFiniteNumber(fallbackOrder?.deliveryFee, 0)),
+    taxableTotal: toFiniteNumber(raw.taxableTotal, 0),
+    gstTotal: toFiniteNumber(raw.gstTotal, 0),
+    cgstTotal: toFiniteNumber(raw.cgstTotal, 0),
+    sgstTotal: toFiniteNumber(raw.sgstTotal, 0),
+    igstTotal: toFiniteNumber(raw.igstTotal, 0),
+    roundOff: toFiniteNumber(raw.roundOff, 0),
+    billToName: String(raw.billToName || raw.customerName || ''),
+    billToPhone: toOptionalText(raw.billToPhone),
+    billToEmail: toOptionalText(raw.billToEmail),
+    billToGstin: toOptionalText(raw.billToGstin),
+    billToAddress: toOptionalText(raw.billToAddress),
+    shipToAddress: toOptionalText(raw.shipToAddress),
+    placeOfSupply: toOptionalText(raw.placeOfSupply),
+    sellerName: String(raw.sellerName || ''),
+    sellerGstin: toOptionalText(raw.sellerGstin),
+    sellerAddress: toOptionalText(raw.sellerAddress),
+    sellerState: toOptionalText(raw.sellerState),
+    pricesIncludeGst: raw.pricesIncludeGst !== false,
+    amountInWords: String(raw.amountInWords || ''),
+    lines: Array.isArray(raw.lines) ? raw.lines.filter(Boolean) : [],
+  };
+}
+
+function normalizeProfileOrder(value: Partial<ProfileOrder> | null | undefined, index = 0): ProfileOrder {
+  const rawItems = Array.isArray(value?.items)
+    ? value.items.map((item, itemIndex) => normalizeProfileOrderItem(item, itemIndex))
+    : [];
+  const fallbackItems =
+    rawItems.length > 0
+      ? rawItems
+      : value?.productId || value?.model || value?.thumbnail
+        ? [
+            normalizeProfileOrderItem(
+              {
+                id: `${value?.id || value?.orderNumber || 'order'}_item_1`,
+                productId: value?.productId || null,
+                name: String(value?.model || 'Product'),
+                brand: value?.brand || '',
+                category: value?.category || '',
+                model: value?.model || '',
+                qty: Math.max(1, Math.round(toFiniteNumber(value?.itemCount, 1))),
+                lineTotal: toFiniteNumber(value?.total, 0),
+                thumbnail: value?.thumbnail || '',
+              },
+              0,
+            ),
+          ]
+        : [];
+  const items = fallbackItems;
+  const itemCountFromItems = items.reduce((sum, item) => sum + Math.max(1, Math.round(toFiniteNumber(item.qty, 1))), 0);
+  const itemCount = Math.max(0, Math.round(toFiniteNumber(value?.itemCount, itemCountFromItems)));
+
+  return {
+    id: String(value?.id || value?.orderNumber || `order_${index + 1}`),
+    orderNumber: String(value?.orderNumber || value?.id || `Order ${index + 1}`),
+    createdAt: String(value?.createdAt || ''),
+    itemCount: itemCount || itemCountFromItems,
+    total: toFiniteNumber(value?.total, 0),
+    subtotal: toFiniteNumber(value?.subtotal, toFiniteNumber(value?.total, 0)),
+    discount: toFiniteNumber(value?.discount, 0),
+    deliveryFee: toFiniteNumber(value?.deliveryFee, 0),
+    status: normalizeOrderStatus(value?.status),
+    productId: toOptionalText(value?.productId) || null,
+    brand: String(value?.brand || ''),
+    category: String(value?.category || ''),
+    model: String(value?.model || items[0]?.model || items[0]?.name || ''),
+    thumbnail: String(value?.thumbnail || items[0]?.thumbnail || ''),
+    items,
+    invoice: normalizeInvoiceDetail(value?.invoice, value || undefined),
+  };
+}
+
+function normalizeProfileOrders(value: ProfileOrder[] | Partial<ProfileOrder>[] | null | undefined) {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.map((order, index) => normalizeProfileOrder(order, index));
+}
+
 function MainApp() {
   const insets = useSafeAreaInsets();
   const { width: viewportWidth } = useWindowDimensions();
@@ -291,6 +518,9 @@ function MainApp() {
   const [profileLanguage, setProfileLanguage] = useState<'English' | 'Hindi'>('English');
   const [wishlistIds, setWishlistIds] = useState<string[]>([]);
   const [profileOrders, setProfileOrders] = useState<ProfileOrder[]>([]);
+  const [selectedInvoiceOrder, setSelectedInvoiceOrder] = useState<ProfileOrder | null>(null);
+  const [lastPlacedOrderId, setLastPlacedOrderId] = useState<string | null>(null);
+  const [invoiceDownloadOrderId, setInvoiceDownloadOrderId] = useState<string | null>(null);
   const [paymentMethods, setPaymentMethods] = useState<ProfilePaymentMethod[]>(DEFAULT_PAYMENT_METHODS);
   const [installationRequests, setInstallationRequests] = useState<ProfileServiceRequest[]>([]);
   const [warrantyClaims, setWarrantyClaims] = useState<ProfileWarrantyClaim[]>([]);
@@ -811,6 +1041,7 @@ function MainApp() {
   const closeProfileModal = () => {
     setIsProfileModalVisible(false);
     setActiveProfilePanel(null);
+    setSelectedInvoiceOrder(null);
   };
 
   const openProfileEditModal = () => {
@@ -1282,13 +1513,20 @@ function MainApp() {
       setCheckoutEmail('');
       skipNextCartSyncRef.current = true;
       setCartItems(Array.isArray(checkoutRes.cartItems) ? checkoutRes.cartItems : []);
+      const placedOrder =
+        (checkoutRes.order ? normalizeProfileOrder(checkoutRes.order) : undefined) ||
+        (Array.isArray(checkoutRes.orders) && checkoutRes.orders.length > 0
+          ? normalizeProfileOrder(checkoutRes.orders[0])
+          : undefined) ||
+        null;
       if (Array.isArray(checkoutRes.orders) && checkoutRes.orders.length > 0) {
-        setProfileOrders(checkoutRes.orders);
+        setProfileOrders(normalizeProfileOrders(checkoutRes.orders));
       } else if (checkoutRes.order) {
-        setProfileOrders(prev => [checkoutRes.order as ProfileOrder, ...prev]);
+        setProfileOrders(prev => [normalizeProfileOrder(checkoutRes.order), ...prev]);
       } else {
         await loadStorefrontState();
       }
+      setLastPlacedOrderId(placedOrder?.id || null);
       setIsOrderPlaced(true);
       showToast('Order placed successfully');
     } catch (err) {
@@ -1301,6 +1539,36 @@ function MainApp() {
   const continueCheckout = () => {
     setIsOrderPlaced(false);
     setIsCheckoutSheetVisible(true);
+  };
+
+  const closeInvoiceModal = () => {
+    setSelectedInvoiceOrder(null);
+  };
+
+  const openInvoiceForOrder = (order: ProfileOrder) => {
+    setSelectedInvoiceOrder(normalizeProfileOrder(order));
+  };
+
+  const downloadInvoiceForOrder = async (order: ProfileOrder) => {
+    if (!order.invoice) {
+      showToast('Invoice is not available for this order yet', 'error');
+      return;
+    }
+    try {
+      setInvoiceDownloadOrderId(order.id);
+      const response = await storefrontApiRequest<{ downloadUrl: string; invoiceNumber?: string }>(
+        `/api/public/storefront/orders/${encodeURIComponent(order.id)}/invoice-link`,
+      );
+      if (!response.downloadUrl) {
+        throw new Error('Invoice download link is unavailable');
+      }
+      await Linking.openURL(response.downloadUrl);
+      showToast(`${response.invoiceNumber || order.invoice.invoiceNumber} opened for download`);
+    } catch (err) {
+      Alert.alert('Invoice Download Failed', err instanceof Error ? err.message : 'Unable to download invoice');
+    } finally {
+      setInvoiceDownloadOrderId(null);
+    }
   };
 
   const submitFeedback = async () => {
@@ -1449,7 +1717,7 @@ function MainApp() {
 
       skipNextCartSyncRef.current = true;
       setCartItems(Array.isArray(json.cartItems) ? json.cartItems : []);
-      setProfileOrders(Array.isArray(json.orders) ? json.orders : []);
+      setProfileOrders(normalizeProfileOrders(json.orders));
 
       if (token && user) {
         setWishlistIds(Array.isArray(json.wishlistIds) ? json.wishlistIds : []);
@@ -2481,6 +2749,10 @@ function MainApp() {
       Alert.alert('Validation', 'Item Name and HSN/SAC are required.');
       return;
     }
+    if (!itemCapacityAh.trim()) {
+      Alert.alert('Validation', 'Capacity is required.');
+      return;
+    }
     const urlImages = getFilledItemImageUrls(itemImageUrls);
     if (itemImages.length + urlImages.length > MAX_ITEM_IMAGES) {
       Alert.alert('Validation', `You can add up to ${MAX_ITEM_IMAGES} images per item.`);
@@ -2923,6 +3195,60 @@ function MainApp() {
     const total = Math.max(0, subtotal - discount + delivery);
     return { subtotal, discount, delivery, total };
   }, [cartItems]);
+  const lastPlacedOrder = useMemo(
+    () => profileOrders.find(order => order.id === lastPlacedOrderId) || null,
+    [lastPlacedOrderId, profileOrders],
+  );
+  const selectedInvoice = useMemo<InvoiceDetail | null>(
+    () => selectedInvoiceOrder?.invoice || null,
+    [selectedInvoiceOrder],
+  );
+  const selectedOrderItems = useMemo(
+    () => normalizeProfileOrder(selectedInvoiceOrder).items,
+    [selectedInvoiceOrder],
+  );
+  const selectedInvoiceStatusColors = useMemo(
+    () => getInvoiceStatusColors(selectedInvoice?.status || 'Open'),
+    [selectedInvoice],
+  );
+  const orderDetailPalette = useMemo(
+    () => ({
+      background: profileDarkMode ? '#0B1220' : '#EEF2F3',
+      surface: profileDarkMode ? '#111827' : '#FFFFFF',
+      surfaceSoft: profileDarkMode ? '#172033' : '#F8FAFC',
+      border: profileDarkMode ? '#253047' : '#E5E7EB',
+      title: profileDarkMode ? '#F8FAFC' : '#111827',
+      text: profileDarkMode ? '#E5E7EB' : '#1F2937',
+      subtext: profileDarkMode ? '#94A3B8' : '#6B7280',
+      successBg: profileDarkMode ? '#163526' : '#E9F7EF',
+      successText: profileDarkMode ? '#86EFAC' : '#2F6B43',
+      accentBg: profileDarkMode ? '#183B68' : '#E8F1FE',
+      accentText: profileDarkMode ? '#93C5FD' : '#225C9C',
+      buttonBg: profileDarkMode ? '#275FA8' : theme.primary,
+      buttonText: '#FFFFFF',
+      dangerText: profileDarkMode ? '#FCA5A5' : '#B91C1C',
+      summaryBg: profileDarkMode ? '#0F172A' : '#F8FAFC',
+    }),
+    [profileDarkMode, theme.primary],
+  );
+  const themedHeaderIconButtonStyle = useMemo(
+    () => ({
+      backgroundColor: orderDetailPalette.surfaceSoft,
+      borderColor: orderDetailPalette.border,
+      borderWidth: 1,
+    }),
+    [orderDetailPalette.border, orderDetailPalette.surfaceSoft],
+  );
+  const selectedOrderStatusMeta = useMemo(() => {
+    const normalized = String(selectedInvoiceOrder?.status || '').trim().toLowerCase();
+    if (normalized === 'cancelled') {
+      return { label: 'Order Cancelled', bg: profileDarkMode ? '#3A1D1D' : '#FEE2E2', text: '#B91C1C', icon: '!' };
+    }
+    if (normalized === 'delivered') {
+      return { label: 'Delivered', bg: profileDarkMode ? '#183526' : '#E9F7EF', text: '#2F6B43', icon: '✓' };
+    }
+    return { label: 'Order Confirmed', bg: orderDetailPalette.successBg, text: orderDetailPalette.successText, icon: '✓' };
+  }, [orderDetailPalette.successBg, orderDetailPalette.successText, profileDarkMode, selectedInvoiceOrder]);
   const landingSearchStickyHeaderIndices = useMemo(() => {
     if (publicView === 'feedback' || publicView === 'categories' || publicView === 'categoryProducts') {
       return [];
@@ -3160,17 +3486,35 @@ function MainApp() {
           onRequestClose={closeProfileModal}
         >
           <SafeAreaView style={[styles.profileSafe, { backgroundColor: profileDarkMode ? '#0B1220' : '#EEF2F3' }]}>
-            <View style={[styles.profileHeader, { backgroundColor: profileDarkMode ? '#0F172A' : '#FFFFFF' }]}>
-              <Pressable style={styles.profileHeaderIconBtn} onPress={closeProfileModal}>
-                <Text style={[styles.profileHeaderIcon, { color: profileDarkMode ? '#E5E7EB' : '#111827' }]}>←</Text>
+            <View
+              style={[
+                styles.profileHeader,
+                {
+                  backgroundColor: profileDarkMode ? '#0F172A' : '#FFFFFF',
+                  borderBottomColor: orderDetailPalette.border,
+                },
+              ]}
+            >
+              <Pressable style={[styles.profileHeaderIconBtn, themedHeaderIconButtonStyle]} onPress={closeProfileModal}>
+                <Text
+                  style={[
+                    styles.profileHeaderIcon,
+                    {
+                      color: profileDarkMode ? '#E5E7EB' : '#111827',
+                      transform: [{ translateY: -1 }],
+                    },
+                  ]}
+                >
+                  ←
+                </Text>
               </Pressable>
               <Text style={[styles.profileHeaderTitle, { color: profileDarkMode ? '#F8FAFC' : '#111827' }]}>My Profile</Text>
               {token && user ? (
-                <Pressable style={styles.profileHeaderIconBtn} onPress={openProfileEditModal}>
+                <Pressable style={[styles.profileHeaderIconBtn, themedHeaderIconButtonStyle]} onPress={openProfileEditModal}>
                   <Text style={[styles.profileHeaderIcon, { color: profileDarkMode ? '#E5E7EB' : '#111827' }]}>✎</Text>
                 </Pressable>
               ) : (
-                <View style={styles.profileHeaderIconBtn} />
+                <View style={[styles.profileHeaderIconBtn, { backgroundColor: 'transparent', borderWidth: 0 }]} />
               )}
             </View>
 
@@ -3318,53 +3662,112 @@ function MainApp() {
           transparent={false}
           onRequestClose={() => setActiveProfilePanel(null)}
         >
-          <SafeAreaView style={styles.profilePanelSafe}>
-            <View style={styles.profilePanelHeader}>
-              <Pressable style={styles.profileHeaderIconBtn} onPress={() => setActiveProfilePanel(null)}>
-                <Text style={styles.profileHeaderIcon}>←</Text>
+          <SafeAreaView style={[styles.profilePanelSafe, { backgroundColor: orderDetailPalette.background }]}>
+            <View
+              style={[
+                styles.profilePanelHeader,
+                {
+                  backgroundColor: orderDetailPalette.surface,
+                  borderBottomColor: orderDetailPalette.border,
+                },
+              ]}
+            >
+              <Pressable style={[styles.profileHeaderIconBtn, themedHeaderIconButtonStyle]} onPress={() => setActiveProfilePanel(null)}>
+                <Text style={[styles.profileHeaderIcon, { color: orderDetailPalette.title }]}>←</Text>
               </Pressable>
-              <Text style={styles.profilePanelTitle}>{activeProfilePanelTitle}</Text>
+              <Text style={[styles.profilePanelTitle, { color: orderDetailPalette.title }]}>{activeProfilePanelTitle}</Text>
               <View style={styles.checkoutHeaderSpacer} />
             </View>
             <ScrollView removeClippedSubviews contentContainerStyle={styles.profilePanelContent}>
               {activeProfilePanel === 'orders' ? (
-                <View style={styles.profilePanelCard}>
+                <View
+                  style={[
+                    styles.profilePanelCard,
+                    {
+                      backgroundColor: orderDetailPalette.surface,
+                      borderColor: orderDetailPalette.border,
+                    },
+                  ]}
+                >
                   {profileOrders.length === 0 ? (
-                    <Text style={styles.profilePanelEmpty}>No orders yet.</Text>
+                    <Text style={[styles.profilePanelEmpty, { color: orderDetailPalette.subtext }]}>No orders yet.</Text>
                   ) : (
                     profileOrders.map(order => {
-                      const orderItemSummary = [order.category, order.model]
-                        .map(value => String(value || '').trim())
-                        .filter(Boolean)
-                        .join(' ');
+                      const orderItems = Array.isArray(order.items) ? order.items : [];
+                      const primaryItem = orderItems[0] || null;
+                      const primaryItemTitle = String(primaryItem?.name || order.model || 'Order details unavailable').trim();
+                      const orderItemSummary = buildOrderItemMetaText(
+                        primaryItemTitle,
+                        primaryItem?.model,
+                        primaryItem?.capacity,
+                      );
+                      const extraItemsLabel =
+                        orderItems.length > 1
+                          ? `+${orderItems.length - 1} more item${orderItems.length - 1 === 1 ? '' : 's'}`
+                          : '';
+                      const invoiceNumber = String(order.invoice?.invoiceNumber || '').trim();
+                      const gstIncludedLabel =
+                        order.invoice && Number(order.invoice.gstTotal || 0) > 0
+                          ? `Incl. GST ${formatCurrency(order.invoice.gstTotal)}`
+                          : 'Invoice pending';
+                      const normalizedOrderStatus = String(order.status || '').trim().toLowerCase();
+                      const orderStatusColor =
+                        normalizedOrderStatus === 'cancelled'
+                          ? orderDetailPalette.dangerText
+                          : normalizedOrderStatus === 'delivered'
+                            ? orderDetailPalette.successText
+                            : orderDetailPalette.accentText;
 
                       return (
                         <Pressable
                           key={order.id}
-                          style={styles.profilePanelRow}
-                          onPress={() => {
-                            if (!order.productId) {
-                              showToast('Product details unavailable for this order', 'error');
-                              return;
-                            }
-                            setActiveProfilePanel(null);
-                            closeProfileModal();
-                            openProductDetail(order.productId);
-                          }}
+                          style={[
+                            styles.profilePanelRow,
+                            styles.profileOrderRow,
+                            {
+                              backgroundColor: orderDetailPalette.surfaceSoft,
+                              borderColor: orderDetailPalette.border,
+                              borderWidth: 1,
+                              borderRadius: 18,
+                              paddingHorizontal: 10,
+                              paddingVertical: 10,
+                            },
+                          ]}
+                          onPress={() => openInvoiceForOrder(order)}
                         >
                           <Image
                             source={
-                              typeof order.thumbnail === 'string' && order.thumbnail.trim().length > 0
-                                ? { uri: order.thumbnail }
+                              typeof (primaryItem?.thumbnail || order.thumbnail) === 'string' &&
+                              String(primaryItem?.thumbnail || order.thumbnail).trim().length > 0
+                                ? { uri: String(primaryItem?.thumbnail || order.thumbnail) }
                                 : appBrandLogo
                             }
                             style={styles.profileWishlistImage}
                           />
-                          <View style={{ flex: 1 }}>
-                            <Text style={styles.profilePanelMain}>Placed on {order.createdAt}</Text>
-                            <Text style={styles.profilePanelSub} numberOfLines={2}>
-                              {orderItemSummary || 'Product details unavailable'}
+                          <View style={styles.profileOrderContent}>
+                            <Text style={[styles.profilePanelMain, { color: orderDetailPalette.title }]}>
+                              {formatDisplayOrderCode(order.orderNumber)}
                             </Text>
+                            <Text style={[styles.profilePanelSub, { color: orderDetailPalette.text }]} numberOfLines={2}>
+                              {primaryItemTitle}
+                            </Text>
+                            <Text style={[styles.profilePanelSub, { color: orderDetailPalette.subtext }]} numberOfLines={1}>
+                              {[orderItemSummary, extraItemsLabel || `${order.itemCount} item${order.itemCount > 1 ? 's' : ''}`]
+                                .filter(Boolean)
+                                .join(' • ')}
+                            </Text>
+                            <Text style={[styles.profileOrderMetaText, { color: orderDetailPalette.accentText }]}>
+                              {invoiceNumber ? `${invoiceNumber} • ` : ''}
+                              {formatDisplayDate(order.createdAt)}
+                            </Text>
+                            <Text style={[styles.profileOrderTaxHint, { color: orderDetailPalette.successText }]}>{gstIncludedLabel}</Text>
+                          </View>
+                          <View style={styles.profileOrderAside}>
+                            <Text style={[styles.profilePanelAmount, { color: orderDetailPalette.title }]}>
+                              {formatCurrency(order.total)}
+                            </Text>
+                            <Text style={[styles.profilePanelStatus, { color: orderStatusColor }]}>{order.status}</Text>
+                            <Text style={[styles.profilePanelLink, { color: orderDetailPalette.buttonBg }]}>Open Details</Text>
                           </View>
                         </Pressable>
                       );
@@ -3374,16 +3777,28 @@ function MainApp() {
               ) : null}
 
               {activeProfilePanel === 'wishlist' ? (
-                <View style={styles.profilePanelCard}>
+                <View
+                  style={[
+                    styles.profilePanelCard,
+                    {
+                      backgroundColor: orderDetailPalette.surface,
+                      borderColor: orderDetailPalette.border,
+                    },
+                  ]}
+                >
                   {wishlistProducts.length === 0 ? (
-                    <Text style={styles.profilePanelEmpty}>No wishlist items yet.</Text>
+                    <Text style={[styles.profilePanelEmpty, { color: orderDetailPalette.subtext }]}>No wishlist items yet.</Text>
                   ) : (
                     wishlistProducts.map(product => (
                       <View key={product.id} style={styles.profileWishlistRow}>
                         <Image source={{ uri: product.thumbnail }} style={styles.profileWishlistImage} />
                         <View style={{ flex: 1 }}>
-                          <Text style={styles.profilePanelMain} numberOfLines={1}>{product.name}</Text>
-                          <Text style={styles.profilePanelSub} numberOfLines={1}>{product.model}</Text>
+                          <Text style={[styles.profilePanelMain, { color: orderDetailPalette.title }]} numberOfLines={1}>
+                            {product.name}
+                          </Text>
+                          <Text style={[styles.profilePanelSub, { color: orderDetailPalette.subtext }]} numberOfLines={1}>
+                            {product.model}
+                          </Text>
                         </View>
                         <Pressable
                           onPress={() => {
@@ -3392,10 +3807,10 @@ function MainApp() {
                             openProductDetail(product.id);
                           }}
                         >
-                          <Text style={styles.profilePanelLink}>Open</Text>
+                          <Text style={[styles.profilePanelLink, { color: orderDetailPalette.buttonBg }]}>Open</Text>
                         </Pressable>
                         <Pressable onPress={() => toggleWishlist(product.id)}>
-                          <Text style={styles.profilePanelLinkDanger}>Remove</Text>
+                          <Text style={[styles.profilePanelLinkDanger, { color: orderDetailPalette.dangerText }]}>Remove</Text>
                         </Pressable>
                       </View>
                     ))
@@ -3404,32 +3819,61 @@ function MainApp() {
               ) : null}
 
               {activeProfilePanel === 'payments' ? (
-                <View style={styles.profilePanelCard}>
+                <View
+                  style={[
+                    styles.profilePanelCard,
+                    {
+                      backgroundColor: orderDetailPalette.surface,
+                      borderColor: orderDetailPalette.border,
+                    },
+                  ]}
+                >
                   {paymentMethods.map(method => (
                     <View key={method.id} style={styles.profilePanelRow}>
                       <View style={{ flex: 1 }}>
-                        <Text style={styles.profilePanelMain}>{method.label}</Text>
-                        <Text style={styles.profilePanelSub}>{method.detail}</Text>
+                        <Text style={[styles.profilePanelMain, { color: orderDetailPalette.title }]}>{method.label}</Text>
+                        <Text style={[styles.profilePanelSub, { color: orderDetailPalette.subtext }]}>{method.detail}</Text>
                       </View>
                       {method.isDefault ? (
-                        <Text style={styles.profilePanelBadge}>Default</Text>
+                        <Text
+                          style={[
+                            styles.profilePanelBadge,
+                            {
+                              backgroundColor: orderDetailPalette.accentBg,
+                              color: orderDetailPalette.accentText,
+                            },
+                          ]}
+                        >
+                          Default
+                        </Text>
                       ) : (
                         <Pressable onPress={() => setDefaultPaymentMethod(method.id)}>
-                          <Text style={styles.profilePanelLink}>Set Default</Text>
+                          <Text style={[styles.profilePanelLink, { color: orderDetailPalette.buttonBg }]}>Set Default</Text>
                         </Pressable>
                       )}
                     </View>
                   ))}
-                  <Pressable style={styles.profilePanelPrimaryBtn} onPress={addPaymentMethod}>
+                  <Pressable
+                    style={[styles.profilePanelPrimaryBtn, { backgroundColor: orderDetailPalette.buttonBg }]}
+                    onPress={addPaymentMethod}
+                  >
                     <Text style={styles.profilePanelPrimaryText}>Add UPI Method</Text>
                   </Pressable>
                 </View>
               ) : null}
 
               {activeProfilePanel === 'notifications' ? (
-                <View style={styles.profilePanelCard}>
+                <View
+                  style={[
+                    styles.profilePanelCard,
+                    {
+                      backgroundColor: orderDetailPalette.surface,
+                      borderColor: orderDetailPalette.border,
+                    },
+                  ]}
+                >
                   <View style={styles.profilePanelRow}>
-                    <Text style={styles.profilePanelMain}>Order Updates</Text>
+                    <Text style={[styles.profilePanelMain, { color: orderDetailPalette.title }]}>Order Updates</Text>
                     <Pressable
                       style={[styles.profileToggleTrack, notificationPrefs.orderUpdates && styles.profileToggleTrackActive]}
                       onPress={() => updateNotificationPrefs({ orderUpdates: !notificationPrefs.orderUpdates })}
@@ -3438,7 +3882,7 @@ function MainApp() {
                     </Pressable>
                   </View>
                   <View style={styles.profilePanelRow}>
-                    <Text style={styles.profilePanelMain}>Promotional Offers</Text>
+                    <Text style={[styles.profilePanelMain, { color: orderDetailPalette.title }]}>Promotional Offers</Text>
                     <Pressable
                       style={[styles.profileToggleTrack, notificationPrefs.promotions && styles.profileToggleTrackActive]}
                       onPress={() => updateNotificationPrefs({ promotions: !notificationPrefs.promotions })}
@@ -3447,7 +3891,7 @@ function MainApp() {
                     </Pressable>
                   </View>
                   <View style={styles.profilePanelRow}>
-                    <Text style={styles.profilePanelMain}>Warranty Alerts</Text>
+                    <Text style={[styles.profilePanelMain, { color: orderDetailPalette.title }]}>Warranty Alerts</Text>
                     <Pressable
                       style={[styles.profileToggleTrack, notificationPrefs.warrantyAlerts && styles.profileToggleTrackActive]}
                       onPress={() => updateNotificationPrefs({ warrantyAlerts: !notificationPrefs.warrantyAlerts })}
@@ -3459,66 +3903,393 @@ function MainApp() {
               ) : null}
 
               {activeProfilePanel === 'installation' ? (
-                <View style={styles.profilePanelCard}>
+                <View
+                  style={[
+                    styles.profilePanelCard,
+                    {
+                      backgroundColor: orderDetailPalette.surface,
+                      borderColor: orderDetailPalette.border,
+                    },
+                  ]}
+                >
                   {installationRequests.length === 0 ? (
-                    <Text style={styles.profilePanelEmpty}>No installation requests yet.</Text>
+                    <Text style={[styles.profilePanelEmpty, { color: orderDetailPalette.subtext }]}>
+                      No installation requests yet.
+                    </Text>
                   ) : (
                     installationRequests.map(req => (
                       <View key={req.id} style={styles.profilePanelRow}>
                         <View style={{ flex: 1 }}>
-                          <Text style={styles.profilePanelMain}>{req.id}</Text>
-                          <Text style={styles.profilePanelSub}>{req.createdAt} • {req.note}</Text>
+                          <Text style={[styles.profilePanelMain, { color: orderDetailPalette.title }]}>{req.id}</Text>
+                          <Text style={[styles.profilePanelSub, { color: orderDetailPalette.subtext }]}>
+                            {req.createdAt} • {req.note}
+                          </Text>
                         </View>
-                        <Text style={styles.profilePanelStatus}>{req.status}</Text>
+                        <Text style={[styles.profilePanelStatus, { color: orderDetailPalette.accentText }]}>{req.status}</Text>
                       </View>
                     ))
                   )}
-                  <Pressable style={styles.profilePanelPrimaryBtn} onPress={addInstallationRequest}>
+                  <Pressable
+                    style={[styles.profilePanelPrimaryBtn, { backgroundColor: orderDetailPalette.buttonBg }]}
+                    onPress={addInstallationRequest}
+                  >
                     <Text style={styles.profilePanelPrimaryText}>Create Request</Text>
                   </Pressable>
                 </View>
               ) : null}
 
               {activeProfilePanel === 'warranty' ? (
-                <View style={styles.profilePanelCard}>
+                <View
+                  style={[
+                    styles.profilePanelCard,
+                    {
+                      backgroundColor: orderDetailPalette.surface,
+                      borderColor: orderDetailPalette.border,
+                    },
+                  ]}
+                >
                   {warrantyClaims.length === 0 ? (
-                    <Text style={styles.profilePanelEmpty}>No warranty claims yet.</Text>
+                    <Text style={[styles.profilePanelEmpty, { color: orderDetailPalette.subtext }]}>No warranty claims yet.</Text>
                   ) : (
                     warrantyClaims.map(claim => (
                       <View key={claim.id} style={styles.profilePanelRow}>
                         <View style={{ flex: 1 }}>
-                          <Text style={styles.profilePanelMain}>{claim.id}</Text>
-                          <Text style={styles.profilePanelSub}>{claim.createdAt} • {claim.note}</Text>
+                          <Text style={[styles.profilePanelMain, { color: orderDetailPalette.title }]}>{claim.id}</Text>
+                          <Text style={[styles.profilePanelSub, { color: orderDetailPalette.subtext }]}>
+                            {claim.createdAt} • {claim.note}
+                          </Text>
                         </View>
-                        <Text style={styles.profilePanelStatus}>{claim.status}</Text>
+                        <Text style={[styles.profilePanelStatus, { color: orderDetailPalette.accentText }]}>{claim.status}</Text>
                       </View>
                     ))
                   )}
-                  <Pressable style={styles.profilePanelPrimaryBtn} onPress={addWarrantyClaim}>
+                  <Pressable
+                    style={[styles.profilePanelPrimaryBtn, { backgroundColor: orderDetailPalette.buttonBg }]}
+                    onPress={addWarrantyClaim}
+                  >
                     <Text style={styles.profilePanelPrimaryText}>File Claim</Text>
                   </Pressable>
                 </View>
               ) : null}
 
               {activeProfilePanel === 'language' ? (
-                <View style={styles.profilePanelCard}>
+                <View
+                  style={[
+                    styles.profilePanelCard,
+                    {
+                      backgroundColor: orderDetailPalette.surface,
+                      borderColor: orderDetailPalette.border,
+                    },
+                  ]}
+                >
                   {(['English', 'Hindi'] as const).map(lang => (
                     <Pressable
                       key={lang}
-                      style={[styles.profileLanguageRow, profileLanguage === lang && styles.profileLanguageRowActive]}
+                      style={[
+                        styles.profileLanguageRow,
+                        profileLanguage === lang && styles.profileLanguageRowActive,
+                        {
+                          borderColor:
+                            profileLanguage === lang ? orderDetailPalette.successText : orderDetailPalette.border,
+                          backgroundColor:
+                            profileLanguage === lang ? orderDetailPalette.successBg : orderDetailPalette.surfaceSoft,
+                        },
+                      ]}
                       onPress={() => {
                         updateUserPreferences({ language: lang });
                         showToast(`Language set to ${lang}`);
                         setActiveProfilePanel(null);
                       }}
                     >
-                      <Text style={[styles.profilePanelMain, profileLanguage === lang && { color: '#166534' }]}>{lang}</Text>
-                      {profileLanguage === lang ? <Text style={styles.profilePanelBadge}>Selected</Text> : null}
+                      <Text
+                        style={[
+                          styles.profilePanelMain,
+                          { color: profileLanguage === lang ? orderDetailPalette.successText : orderDetailPalette.title },
+                        ]}
+                      >
+                        {lang}
+                      </Text>
+                      {profileLanguage === lang ? (
+                        <Text
+                          style={[
+                            styles.profilePanelBadge,
+                            {
+                              backgroundColor: orderDetailPalette.accentBg,
+                              color: orderDetailPalette.accentText,
+                            },
+                          ]}
+                        >
+                          Selected
+                        </Text>
+                      ) : null}
                     </Pressable>
                   ))}
                 </View>
               ) : null}
             </ScrollView>
+          </SafeAreaView>
+        </Modal>
+
+        <Modal
+          visible={Boolean(selectedInvoiceOrder)}
+          animationType="slide"
+          transparent={false}
+          onRequestClose={closeInvoiceModal}
+        >
+          <SafeAreaView style={[styles.orderDetailSafe, { backgroundColor: orderDetailPalette.background }]}>
+            <View
+              style={[
+                styles.orderDetailHeader,
+                { backgroundColor: orderDetailPalette.background, borderBottomColor: orderDetailPalette.border },
+              ]}
+            >
+              <Pressable style={[styles.profileHeaderIconBtn, themedHeaderIconButtonStyle]} onPress={closeInvoiceModal}>
+                <Text style={[styles.profileHeaderIcon, { color: orderDetailPalette.title }]}>←</Text>
+              </Pressable>
+              <Text style={[styles.orderDetailHeaderTitle, { color: orderDetailPalette.title }]}>Order Details</Text>
+              <Pressable
+                style={[
+                  styles.orderDetailHeaderAction,
+                  { borderColor: orderDetailPalette.border, backgroundColor: orderDetailPalette.surface },
+                ]}
+                onPress={() => selectedInvoiceOrder && downloadInvoiceForOrder(selectedInvoiceOrder)}
+                disabled={!selectedInvoiceOrder?.invoice || invoiceDownloadOrderId === selectedInvoiceOrder?.id}
+              >
+                <Text style={[styles.orderDetailHeaderActionText, { color: orderDetailPalette.accentText }]}>
+                  {invoiceDownloadOrderId === selectedInvoiceOrder?.id ? '...' : 'Save'}
+                </Text>
+              </Pressable>
+            </View>
+            {selectedInvoiceOrder ? (
+              <ScrollView removeClippedSubviews contentContainerStyle={styles.orderDetailContent}>
+                <View
+                  style={[
+                    styles.orderDetailCard,
+                    { backgroundColor: orderDetailPalette.surface, borderColor: orderDetailPalette.border },
+                  ]}
+                >
+                  <Text style={[styles.orderDetailOrderNumber, { color: orderDetailPalette.title }]}>
+                    {formatDisplayOrderCode(selectedInvoiceOrder.orderNumber)}
+                  </Text>
+                  <View
+                    style={[
+                      styles.orderDetailStatusRow,
+                      { backgroundColor: selectedOrderStatusMeta.bg, borderColor: orderDetailPalette.border },
+                    ]}
+                  >
+                    <Text style={[styles.orderDetailStatusIcon, { color: selectedOrderStatusMeta.text }]}>
+                      {selectedOrderStatusMeta.icon}
+                    </Text>
+                    <Text style={[styles.orderDetailStatusText, { color: selectedOrderStatusMeta.text }]}>
+                      {selectedOrderStatusMeta.label}
+                    </Text>
+                  </View>
+                  <Text style={[styles.orderDetailMeta, { color: orderDetailPalette.subtext }]}>
+                    {formatDisplayDate(selectedInvoiceOrder.createdAt)}
+                    {selectedInvoice?.invoiceNumber ? ` • ${selectedInvoice.invoiceNumber}` : ''}
+                  </Text>
+                </View>
+
+                <View
+                  style={[
+                    styles.orderDetailCard,
+                    { backgroundColor: orderDetailPalette.surface, borderColor: orderDetailPalette.border },
+                  ]}
+                >
+                  <View style={styles.orderDetailSectionHeader}>
+                    <Text style={[styles.orderDetailSectionTitle, { color: orderDetailPalette.title }]}>Order Items</Text>
+                    <Text style={[styles.orderDetailSectionMeta, { color: orderDetailPalette.subtext }]}>
+                      {Math.max(selectedInvoiceOrder.itemCount || 0, selectedOrderItems.length)} item
+                      {Math.max(selectedInvoiceOrder.itemCount || 0, selectedOrderItems.length) === 1 ? '' : 's'}
+                    </Text>
+                  </View>
+                  {selectedOrderItems.map(item => {
+                    const itemLineTotal = Number(item.lineTotal || (item.unitPrice || 0) * item.qty);
+                    const itemMetaText = buildOrderItemMetaText(item.name, item.model, item.capacity);
+                    return (
+                      <View
+                        key={item.id}
+                        style={[
+                          styles.orderDetailItemRow,
+                          { borderTopColor: orderDetailPalette.border },
+                        ]}
+                      >
+                        <Image
+                          source={
+                            typeof item.thumbnail === 'string' && item.thumbnail.trim().length > 0
+                              ? { uri: item.thumbnail }
+                              : appBrandLogo
+                          }
+                          style={styles.orderDetailItemImage}
+                          resizeMode="cover"
+                        />
+                        <View style={styles.orderDetailItemMain}>
+                          <Text style={[styles.orderDetailItemTitle, { color: orderDetailPalette.title }]} numberOfLines={2}>
+                            {item.name}
+                          </Text>
+                          <Text style={[styles.orderDetailItemSub, { color: orderDetailPalette.subtext }]} numberOfLines={2}>
+                            {itemMetaText || 'Product details'}
+                          </Text>
+                          <Text style={[styles.orderDetailItemQty, { color: orderDetailPalette.subtext }]}>Qty: {item.qty}</Text>
+                          <Text style={[styles.orderDetailItemAmount, { color: orderDetailPalette.title }]}>
+                            {formatCurrency(itemLineTotal)}
+                          </Text>
+                        </View>
+                        <Pressable
+                          style={[
+                            styles.orderDetailItemButton,
+                            {
+                              backgroundColor: item.productId ? orderDetailPalette.buttonBg : orderDetailPalette.border,
+                              opacity: item.productId ? 1 : 0.65,
+                            },
+                          ]}
+                          onPress={() => {
+                            if (!item.productId) {
+                              showToast('Product details unavailable for this item', 'error');
+                              return;
+                            }
+                            closeInvoiceModal();
+                            setActiveProfilePanel(null);
+                            setIsProfileModalVisible(false);
+                            openProductDetail(item.productId);
+                          }}
+                          disabled={!item.productId}
+                        >
+                          <Text style={[styles.orderDetailItemButtonText, { color: orderDetailPalette.buttonText }]}>
+                            View Details
+                          </Text>
+                        </Pressable>
+                      </View>
+                    );
+                  })}
+                </View>
+
+                <View
+                  style={[
+                    styles.orderDetailCard,
+                    { backgroundColor: orderDetailPalette.surface, borderColor: orderDetailPalette.border },
+                  ]}
+                >
+                  <View style={styles.orderDetailSectionHeader}>
+                    <Text style={[styles.orderDetailSectionTitle, { color: orderDetailPalette.title }]}>Shipping Address</Text>
+                    {selectedInvoice?.invoiceNumber ? (
+                      <View
+                        style={[
+                          styles.orderDetailInlineBadge,
+                          { backgroundColor: orderDetailPalette.accentBg },
+                        ]}
+                      >
+                        <Text style={[styles.orderDetailInlineBadgeText, { color: orderDetailPalette.accentText }]}>
+                          {selectedInvoice.invoiceNumber}
+                        </Text>
+                      </View>
+                    ) : null}
+                  </View>
+                  <Text style={[styles.orderDetailAddressName, { color: orderDetailPalette.title }]}>
+                    {selectedInvoice?.billToName || profileName}
+                  </Text>
+                  <Text style={[styles.orderDetailAddressText, { color: orderDetailPalette.text }]}>
+                    {selectedInvoice?.shipToAddress || selectedInvoice?.billToAddress || 'Address unavailable'}
+                  </Text>
+                  {selectedInvoice?.billToPhone ? (
+                    <Text style={[styles.orderDetailAddressPhone, { color: orderDetailPalette.accentText }]}>
+                      {selectedInvoice.billToPhone}
+                    </Text>
+                  ) : null}
+                </View>
+
+                <View
+                  style={[
+                    styles.orderDetailCard,
+                    { backgroundColor: orderDetailPalette.surface, borderColor: orderDetailPalette.border },
+                  ]}
+                >
+                  <Text style={[styles.orderDetailSectionTitle, { color: orderDetailPalette.title }]}>Payment Summary</Text>
+                  <View style={[styles.orderDetailSummaryRow, { borderBottomColor: orderDetailPalette.border }]}>
+                    <Text style={[styles.orderDetailSummaryLabel, { color: orderDetailPalette.subtext }]}>Total Price</Text>
+                    <Text style={[styles.orderDetailSummaryValue, { color: orderDetailPalette.title }]}>
+                      {formatCurrency(selectedInvoice?.subtotal ?? selectedInvoiceOrder.subtotal ?? selectedInvoiceOrder.total)}
+                    </Text>
+                  </View>
+                  <View style={styles.orderDetailSummaryRow}>
+                    <Text style={[styles.orderDetailSummaryLabel, { color: orderDetailPalette.subtext }]}>Free Delivery</Text>
+                    <Text style={[styles.orderDetailSummaryAccent, { color: orderDetailPalette.successText }]}>
+                      {Number(selectedInvoice?.deliveryFee || selectedInvoiceOrder.deliveryFee || 0) === 0
+                        ? formatCurrency(0)
+                        : formatCurrency(selectedInvoice?.deliveryFee || selectedInvoiceOrder.deliveryFee || 0)}
+                    </Text>
+                  </View>
+                  <View style={styles.orderDetailSummaryRow}>
+                    <Text style={[styles.orderDetailSummaryLabel, { color: orderDetailPalette.subtext }]}>Discount</Text>
+                    <Text style={[styles.orderDetailSummaryAccent, { color: orderDetailPalette.dangerText }]}>
+                      {formatCurrency(selectedInvoice?.discount ?? selectedInvoiceOrder.discount ?? 0)}
+                    </Text>
+                  </View>
+                  <View style={styles.orderDetailSummaryRow}>
+                    <Text style={[styles.orderDetailSummaryLabel, { color: orderDetailPalette.subtext }]}>Included GST</Text>
+                    <Text style={[styles.orderDetailSummaryAccent, { color: orderDetailPalette.successText }]}>
+                      {formatCurrency(selectedInvoice?.gstTotal ?? 0)}
+                    </Text>
+                  </View>
+                  <View style={[styles.orderDetailSummaryTotalRow, { borderTopColor: orderDetailPalette.border }]}>
+                    <Text style={[styles.orderDetailSummaryTotalLabel, { color: orderDetailPalette.title }]}>Total Amount</Text>
+                    <Text style={[styles.orderDetailSummaryTotalValue, { color: orderDetailPalette.title }]}>
+                      {formatCurrency(selectedInvoice?.total ?? selectedInvoiceOrder.total)}
+                    </Text>
+                  </View>
+                  <View style={styles.orderDetailSummaryFooter}>
+                    <Text style={[styles.orderDetailPaymentStatus, { color: selectedInvoiceStatusColors.text }]}>
+                      {selectedInvoice ? selectedInvoice.status : selectedInvoiceOrder.status}
+                    </Text>
+                    <Text style={[styles.orderDetailPaymentNote, { color: orderDetailPalette.subtext }]}>
+                      GST is already included in the payable amount.
+                    </Text>
+                  </View>
+                </View>
+
+                {selectedInvoice ? (
+                  <View
+                    style={[
+                      styles.orderDetailCard,
+                      { backgroundColor: orderDetailPalette.summaryBg, borderColor: orderDetailPalette.border },
+                    ]}
+                  >
+                    <Text style={[styles.orderDetailSectionTitle, { color: orderDetailPalette.title }]}>Invoice Notes</Text>
+                    <Text style={[styles.orderDetailNoteText, { color: orderDetailPalette.text }]}>
+                      {selectedInvoice.amountInWords}
+                    </Text>
+                    <Text style={[styles.orderDetailNoteSubtext, { color: orderDetailPalette.subtext }]}>
+                      Seller: {selectedInvoice.sellerName}
+                      {selectedInvoice.sellerGstin ? ` • GSTIN ${selectedInvoice.sellerGstin}` : ''}
+                    </Text>
+                  </View>
+                ) : null}
+
+                <View style={styles.orderDetailActionRow}>
+                  <Pressable
+                    style={[
+                      styles.orderDetailPrimaryBtn,
+                      { backgroundColor: selectedInvoice ? orderDetailPalette.buttonBg : orderDetailPalette.border },
+                    ]}
+                    onPress={() => downloadInvoiceForOrder(selectedInvoiceOrder)}
+                    disabled={!selectedInvoice || invoiceDownloadOrderId === selectedInvoiceOrder.id}
+                  >
+                    <Text style={[styles.orderDetailPrimaryBtnText, { color: orderDetailPalette.buttonText }]}>
+                      {invoiceDownloadOrderId === selectedInvoiceOrder.id ? 'Preparing Invoice...' : 'Download Invoice'}
+                    </Text>
+                  </Pressable>
+                  <Pressable
+                    style={[
+                      styles.orderDetailSecondaryBtn,
+                      { backgroundColor: orderDetailPalette.surface, borderColor: orderDetailPalette.buttonBg },
+                    ]}
+                    onPress={openContactSupport}
+                  >
+                    <Text style={[styles.orderDetailSecondaryBtnText, { color: orderDetailPalette.buttonBg }]}>Need Help?</Text>
+                  </Pressable>
+                </View>
+              </ScrollView>
+            ) : null}
           </SafeAreaView>
         </Modal>
 
@@ -3697,8 +4468,17 @@ function MainApp() {
           <SafeAreaView style={[styles.authModalSafe, { backgroundColor: theme.bg }]}>
             <ScrollView removeClippedSubviews contentContainerStyle={styles.authModalContent} keyboardShouldPersistTaps="handled">
               <View style={styles.authModalTop}>
-                <Pressable onPress={closeAuthModal} style={styles.authBackBtn}>
-                  <Text style={styles.authBackText}>←</Text>
+                <Pressable
+                  onPress={closeAuthModal}
+                  style={[
+                    styles.authBackBtn,
+                    {
+                      backgroundColor: orderDetailPalette.surfaceSoft,
+                      borderColor: orderDetailPalette.border,
+                    },
+                  ]}
+                >
+                  <Text style={[styles.authBackText, { color: orderDetailPalette.title }]}>←</Text>
                 </Pressable>
               </View>
 
@@ -3913,12 +4693,24 @@ function MainApp() {
           onRequestClose={() => setIsLocationModalVisible(false)}
         >
           <SafeAreaView style={[styles.locationModalSafe, { backgroundColor: theme.bg }]}>
-            <View style={styles.locationModalHeader}>
-              <Pressable onPress={() => setIsLocationModalVisible(false)}>
-                <Text style={styles.locationModalBack}>←</Text>
+            <View
+              style={[
+                styles.locationModalHeader,
+                {
+                  backgroundColor: orderDetailPalette.surface,
+                  borderBottomColor: orderDetailPalette.border,
+                  borderBottomWidth: 1,
+                },
+              ]}
+            >
+              <Pressable
+                onPress={() => setIsLocationModalVisible(false)}
+                style={[styles.profileHeaderIconBtn, themedHeaderIconButtonStyle]}
+              >
+                <Text style={[styles.locationModalBack, { color: orderDetailPalette.title }]}>←</Text>
               </Pressable>
-              <Text style={styles.locationModalTitle}>Delivery Location</Text>
-              <View style={{ width: 20 }} />
+              <Text style={[styles.locationModalTitle, { color: orderDetailPalette.title }]}>Delivery Location</Text>
+              <View style={{ width: 34, height: 34 }} />
             </View>
 
             <View style={styles.locationModalSearchWrap}>
@@ -4237,6 +5029,21 @@ function MainApp() {
                   <Text style={styles.checkoutPlacedText}>Order placed successfully.</Text>
                 </View>
               ) : null}
+              {isOrderPlaced && lastPlacedOrder?.invoice ? (
+                <View style={styles.checkoutSuccessCard}>
+                  <Text style={styles.checkoutSuccessTitle}>{lastPlacedOrder.invoice.invoiceNumber} created</Text>
+                  <Text style={styles.checkoutSuccessSub}>
+                    {formatCurrency(lastPlacedOrder.total)} payable amount already includes GST of{' '}
+                    {formatCurrency(lastPlacedOrder.invoice.gstTotal)}.
+                  </Text>
+                  <Text style={styles.checkoutSuccessSub}>
+                    {formatDisplayOrderCode(lastPlacedOrder.orderNumber)} • {formatDisplayDate(lastPlacedOrder.createdAt)}
+                  </Text>
+                  <Pressable style={styles.checkoutSuccessBtn} onPress={() => openInvoiceForOrder(lastPlacedOrder)}>
+                    <Text style={styles.checkoutSuccessBtnText}>View Tax Invoice</Text>
+                  </Pressable>
+                </View>
+              ) : null}
               {cartItems.length === 0 ? (
                 <View style={[styles.checkoutEmptyState, { backgroundColor: theme.panel, borderColor: theme.steel }]}>
                   <Text style={[styles.checkoutEmptyText, { color: theme.subtext }]}>Your cart is empty.</Text>
@@ -4351,9 +5158,9 @@ function MainApp() {
                 ]}
               >
                 <View style={styles.rowBetween}>
-                  <Text style={[styles.title, { color: theme.text }]}>{viewMoreTitle}</Text>
-                  <Pressable onPress={closeViewMoreModal} style={{ padding: 4, paddingHorizontal: 8 }}>
-                    <Text style={[styles.small, { color: theme.danger, fontSize: 13, fontWeight: '800' }]}>Close</Text>
+                  <Text style={[styles.title, { color: theme.text, flex: 1, paddingRight: 12 }]}>{viewMoreTitle}</Text>
+                  <Pressable onPress={closeViewMoreModal} style={[styles.profileHeaderIconBtn, themedHeaderIconButtonStyle]}>
+                    <Text style={[styles.profileHeaderIcon, { color: theme.text, fontSize: 14, lineHeight: 14 }]}>✕</Text>
                   </Pressable>
                 </View>
               </View>
