@@ -329,6 +329,26 @@ What happens after a pull:
 - it publishes the APK and update manifest
 - it restarts `mobile-api` with `APP_ENV=production`
 
+Temporarily skip the auto-build for one pull:
+
+```sh
+git -c autoRelease.skipBuild=true pull origin main
+```
+
+Alternative using an environment variable:
+
+```sh
+SKIP_AUTO_RELEASE=1 git pull origin main
+```
+
+Temporarily skip it for a few pulls:
+
+```sh
+touch .git/skip-auto-release
+git pull origin main
+rm -f .git/skip-auto-release
+```
+
 Runtime-only state written on EC2:
 
 - APKs: `server/data/generated/app-updates/`

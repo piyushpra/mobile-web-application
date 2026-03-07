@@ -37,6 +37,29 @@ function readJson(filePath, fallback) {
   }
 }
 
+function isTruthyEnv(value) {
+  const normalized = String(value || '').trim().toLowerCase();
+  return ['1', 'true', 'yes', 'on'].includes(normalized);
+}
+
+function readGitCommandConfigFlag(configKey) {
+  const count = Number(process.env.GIT_CONFIG_COUNT || 0);
+  if (Number.isInteger(count) && count > 0) {
+    for (let index = 0; index < count; index += 1) {
+      const key = String(process.env[`GIT_CONFIG_KEY_${index}`] || '').trim();
+      if (key === configKey) {
+        return isTruthyEnv(process.env[`GIT_CONFIG_VALUE_${index}`]);
+      }
+    }
+  }
+
+  try {
+    return isTruthyEnv(runCapture('git', ['config', '--bool', '--get', configKey], { cwd: repoRoot }));
+  } catch {
+    return false;
+  }
+}
+
 function incrementPatchVersion(version) {
   const parts = String(version || '')
     .trim()
@@ -101,6 +124,8 @@ function isReleaseRelevantChange(filePath) {
 }
 
 const repoRoot = path.resolve(__dirname, '..');
+const skipMarkerPath = path.join(repoRoot, '.git', 'skip-auto-release');
+const skipByGitPullFlag = readGitCommandConfigFlag('autoRelease.skipBuild');
 const generatedRoot = path.join(repoRoot, 'server', 'data', 'generated');
 const releaseStatePath = path.join(generatedRoot, 'android_release_state.json');
 const runtimeManifestPath = path.join(generatedRoot, 'app_update_manifest.json');
@@ -110,6 +135,11 @@ const trackedVersion = extractTrackedAndroidVersion(trackedGradleText);
 const priorState = readJson(releaseStatePath, {});
 const priorManifest = readJson(runtimeManifestPath, {});
 const changedFiles = getChangedFiles(repoRoot);
+
+if (skipByGitPullFlag || isTruthyEnv(process.env.SKIP_AUTO_RELEASE) || fs.existsSync(skipMarkerPath)) {
+  process.stdout.write('Skipping auto-release: SKIP_AUTO_RELEASE is enabled.\n');
+  process.exit(0);
+}
 
 if (changedFiles.length > 0 && !changedFiles.some(isReleaseRelevantChange)) {
   process.stdout.write('Skipping auto-release: no release-relevant changes detected.\n');
