@@ -1382,6 +1382,55 @@ const styles = StyleSheet.create({
   navSliderChip: {
     flexShrink: 0,
   },
+  adminNavChip: {
+    flexShrink: 0,
+    paddingHorizontal: 11,
+    paddingVertical: 8,
+    borderRadius: 999,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  adminNavChipLight: {
+    backgroundColor: '#F4F7F4',
+    borderWidth: 1,
+    borderColor: '#E5E7EB',
+    shadowColor: '#64748B',
+    shadowOpacity: 0.12,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 4 },
+    elevation: 2,
+  },
+  adminNavChipLightActive: {
+    backgroundColor: '#F8FAF7',
+    borderWidth: 2,
+    borderColor: '#5F9D67',
+    shadowColor: '#3E7B53',
+    shadowOpacity: 0.16,
+    shadowRadius: 10,
+    shadowOffset: { width: 0, height: 5 },
+    elevation: 3,
+  },
+  adminNavChipDark: {
+    backgroundColor: '#334155',
+    borderWidth: 1,
+    borderColor: '#334155',
+  },
+  adminNavChipDarkActive: {
+    backgroundColor: '#60A5FA',
+    borderWidth: 1,
+    borderColor: '#60A5FA',
+  },
+  adminNavChipText: {
+    fontSize: scaleFont(12),
+    fontWeight: '800',
+    letterSpacing: 0.1,
+  },
+  adminNavChipTextLightActive: {
+    color: '#225C3D',
+  },
+  adminNavChipTextDarkActive: {
+    color: '#FFFFFF',
+  },
   rowBetween: {
     flexDirection: 'row',
     justifyContent: 'space-between',
@@ -1632,6 +1681,39 @@ const styles = StyleSheet.create({
     color: '#FFFFFF',
     fontSize: scaleFont(10),
     fontWeight: '900',
+  },
+  cardDiscountStrip: {
+    position: 'absolute',
+    top: 0,
+    right: 0,
+    zIndex: 3,
+    minWidth: scaleSize(70, 0.88, 1.05),
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderTopRightRadius: 10,
+    borderBottomLeftRadius: 12,
+    borderWidth: 1,
+  },
+  cardDiscountStripLight: {
+    backgroundColor: '#E6F7EB',
+    borderColor: '#B8E2C5',
+  },
+  cardDiscountStripDark: {
+    backgroundColor: '#153929',
+    borderColor: '#1F6A53',
+  },
+  cardDiscountStripText: {
+    fontSize: scaleFont(10),
+    fontWeight: '900',
+    letterSpacing: 0.3,
+  },
+  cardDiscountStripTextLight: {
+    color: '#166534',
+  },
+  cardDiscountStripTextDark: {
+    color: '#86EFAC',
   },
   productInCartBadge: {
     marginTop: 2,

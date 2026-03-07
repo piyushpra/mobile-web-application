@@ -1,5 +1,5 @@
 import React from 'react';
-import { Animated, Image, Modal, Pressable, ScrollView, Text, TextInput, View } from 'react-native';
+import { Animated, Image, Keyboard, Modal, Pressable, ScrollView, Text, TextInput, View } from 'react-native';
 
 import ListRow from '../ListRow';
 import Picker from '../Picker';
@@ -9,6 +9,7 @@ import styles from '../../styles';
 
 type Props = any;
 const MANUAL_CAPACITY_OPTION_ID = '__manual_capacity__';
+const NO_CAPACITY_OPTION_ID = '__no_capacity__';
 
 function AdminModuleContent(props: Props) {
   const {
@@ -112,7 +113,7 @@ function AdminModuleContent(props: Props) {
   const presetBrands = React.useMemo(() => ['microtek', 'sukam', 'lumious', 'exide'], []);
   const presetCapacityValues = React.useMemo(() => ahOptions.map(option => option.id), [ahOptions]);
   const capacityOptions = React.useMemo(
-    () => [...ahOptions, { id: MANUAL_CAPACITY_OPTION_ID, label: 'Manual Ah' }],
+    () => [{ id: NO_CAPACITY_OPTION_ID, label: 'Not Set' }, ...ahOptions, { id: MANUAL_CAPACITY_OPTION_ID, label: 'Manual Ah' }],
     [ahOptions],
   );
   const [isCreateBrandDropdownVisible, setIsCreateBrandDropdownVisible] = React.useState(false);
@@ -171,10 +172,13 @@ function AdminModuleContent(props: Props) {
   React.useEffect(() => {
     const rawCapacity = String(itemCapacityAh || '').trim();
     if (!rawCapacity) {
+      if (editingItemId || (!String(itemName || '').trim() && !String(itemSku || '').trim())) {
+        setIsManualCapacityMode(false);
+      }
       return;
     }
     setIsManualCapacityMode(!presetCapacityValues.includes(rawCapacity));
-  }, [itemCapacityAh, presetCapacityValues]);
+  }, [editingItemId, itemCapacityAh, itemName, itemSku, presetCapacityValues]);
 
   React.useEffect(() => () => clearBrandDropdownCloseTimer(), [clearBrandDropdownCloseTimer]);
 
@@ -217,6 +221,7 @@ function AdminModuleContent(props: Props) {
     (context: 'create' | 'edit', brand: string) => {
       setItemBrand(brand);
       closeBrandDropdown(context);
+      Keyboard.dismiss();
     },
     [closeBrandDropdown, setItemBrand],
   );
@@ -228,6 +233,11 @@ function AdminModuleContent(props: Props) {
 
   const handleCapacitySelect = React.useCallback(
     (selectedId: string) => {
+      if (!selectedId || selectedId === NO_CAPACITY_OPTION_ID) {
+        setIsManualCapacityMode(false);
+        setItemCapacityAh('');
+        return;
+      }
       if (selectedId === MANUAL_CAPACITY_OPTION_ID) {
         setIsManualCapacityMode(true);
         if (presetCapacityValues.includes(String(itemCapacityAh || '').trim())) {
@@ -347,20 +357,25 @@ function AdminModuleContent(props: Props) {
                 <ScrollView
                   style={[styles.brandDropdown, { backgroundColor: theme.panel, borderColor: theme.steel }]}
                   nestedScrollEnabled
-                  keyboardShouldPersistTaps="handled"
+                  keyboardShouldPersistTaps="always"
                   showsVerticalScrollIndicator
                 >
                   {(filteredBrandOptions.length > 0 ? filteredBrandOptions : brandOptions).map(brand => (
                     <Pressable
                       key={`brand_${brand.toLowerCase().replace(/[^a-z0-9]+/g, '_')}`}
                       style={styles.brandDropdownItem}
+                      onPressIn={clearBrandDropdownCloseTimer}
                       onPress={() => handleBrandSelect('create', brand)}
                     >
                       <Text style={[styles.brandDropdownText, { color: theme.text }]}>{brand}</Text>
                     </Pressable>
                   ))}
                   <View style={[styles.brandDropdownDivider, { backgroundColor: theme.steel }]} />
-                  <Pressable style={[styles.brandDropdownItem, styles.brandDropdownItemLast]} onPress={() => enableManualBrandEntry('create')}>
+                  <Pressable
+                    style={[styles.brandDropdownItem, styles.brandDropdownItemLast]}
+                    onPressIn={clearBrandDropdownCloseTimer}
+                    onPress={() => enableManualBrandEntry('create')}
+                  >
                     <Text style={styles.brandDropdownManualText}>+ Manual Entry</Text>
                   </Pressable>
                 </ScrollView>
@@ -382,15 +397,15 @@ function AdminModuleContent(props: Props) {
               allowDeselect
             />
             <Picker
-              label="Capacity (Ah)"
-              selectedId={isManualCapacityMode ? MANUAL_CAPACITY_OPTION_ID : itemCapacityAh}
+              label="Capacity (Ah) (Optional)"
+              selectedId={isManualCapacityMode ? MANUAL_CAPACITY_OPTION_ID : itemCapacityAh || NO_CAPACITY_OPTION_ID}
               options={capacityOptions}
               onSelect={handleCapacitySelect}
               theme={theme}
             />
             {isManualCapacityMode ? (
               <>
-                <Text style={[styles.small, styles.fieldLabel, { color: theme.subtext }]}>Manual Capacity (Ah)</Text>
+                <Text style={[styles.small, styles.fieldLabel, { color: theme.subtext }]}>Manual Capacity (Ah) (Optional)</Text>
                 <TextInput
                   value={manualCapacityValue}
                   onChangeText={handleManualCapacityChange}
@@ -501,7 +516,7 @@ function AdminModuleContent(props: Props) {
           <TextInput value={search} onChangeText={setSearch} placeholder="Search items" placeholderTextColor={theme.subtext} style={[styles.input, { color: theme.text, backgroundColor: theme.panelSoft }]} />
           {filteredItems.map((item: any) => {
             const statusColor = item.status === 'In Stock' ? theme.accent : item.status === 'Low Stock' ? theme.warning : theme.danger;
-            const itemSummary = [item.brand || '—', item.category, item.technologyOption, item.capacityAh || '150Ah', `Qty ${item.qty}`]
+            const itemSummary = [item.brand || '—', item.category, item.technologyOption, item.capacityAh, `Qty ${item.qty}`]
               .filter(Boolean)
               .join(' • ');
             return (
@@ -530,7 +545,7 @@ function AdminModuleContent(props: Props) {
             <View style={styles.profileEditBackdrop}>
               <View style={[styles.profileEditCard, styles.profileEditCardTall]}>
                 <ScrollView
-                  keyboardShouldPersistTaps="handled"
+                  keyboardShouldPersistTaps="always"
                   showsVerticalScrollIndicator={false}
                   contentContainerStyle={styles.profileEditScrollContent}
                 >
@@ -567,20 +582,25 @@ function AdminModuleContent(props: Props) {
                       <ScrollView
                         style={[styles.brandDropdown, { backgroundColor: theme.panel, borderColor: theme.steel }]}
                         nestedScrollEnabled
-                        keyboardShouldPersistTaps="handled"
+                        keyboardShouldPersistTaps="always"
                         showsVerticalScrollIndicator
                       >
                         {(filteredBrandOptions.length > 0 ? filteredBrandOptions : brandOptions).map(brand => (
                           <Pressable
                             key={`brand_modal_${brand.toLowerCase().replace(/[^a-z0-9]+/g, '_')}`}
                             style={styles.brandDropdownItem}
+                            onPressIn={clearBrandDropdownCloseTimer}
                             onPress={() => handleBrandSelect('edit', brand)}
                           >
                             <Text style={[styles.brandDropdownText, { color: theme.text }]}>{brand}</Text>
                           </Pressable>
                         ))}
                         <View style={[styles.brandDropdownDivider, { backgroundColor: theme.steel }]} />
-                        <Pressable style={[styles.brandDropdownItem, styles.brandDropdownItemLast]} onPress={() => enableManualBrandEntry('edit')}>
+                        <Pressable
+                          style={[styles.brandDropdownItem, styles.brandDropdownItemLast]}
+                          onPressIn={clearBrandDropdownCloseTimer}
+                          onPress={() => enableManualBrandEntry('edit')}
+                        >
                           <Text style={styles.brandDropdownManualText}>+ Manual Entry</Text>
                         </Pressable>
                       </ScrollView>
@@ -602,15 +622,15 @@ function AdminModuleContent(props: Props) {
                     allowDeselect
                   />
                   <Picker
-                    label="Capacity (Ah)"
-                    selectedId={isManualCapacityMode ? MANUAL_CAPACITY_OPTION_ID : itemCapacityAh}
+                    label="Capacity (Ah) (Optional)"
+                    selectedId={isManualCapacityMode ? MANUAL_CAPACITY_OPTION_ID : itemCapacityAh || NO_CAPACITY_OPTION_ID}
                     options={capacityOptions}
                     onSelect={handleCapacitySelect}
                     theme={theme}
                   />
                   {isManualCapacityMode ? (
                     <>
-                      <Text style={[styles.small, styles.fieldLabel, { color: theme.subtext }]}>Manual Capacity (Ah)</Text>
+                      <Text style={[styles.small, styles.fieldLabel, { color: theme.subtext }]}>Manual Capacity (Ah) (Optional)</Text>
                       <TextInput
                         value={manualCapacityValue}
                         onChangeText={handleManualCapacityChange}

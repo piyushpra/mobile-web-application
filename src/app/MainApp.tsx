@@ -24,6 +24,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import AdminModuleContent from './components/admin/AdminModuleContent';
 import ListRow from './components/ListRow';
 import PublicCatalogSections from './components/public/PublicCatalogSections';
+import ProductDiscountStrip from './components/public/ProductDiscountStrip';
 import PublicFeedbackPage from './components/public/PublicFeedbackPage';
 import PublicFooter from './components/public/PublicFooter';
 import {
@@ -80,6 +81,7 @@ import type {
   ViewMoreContext,
 } from './types';
 import {
+  ALL_CAPACITY_OPTIONS,
   getAvailableCapacities,
   getCapacityOptions,
   getLandingProductModel,
@@ -170,12 +172,10 @@ function isAllowedItemImageUrl(url: string) {
 }
 
 function compareVersionStrings(left: string, right: string) {
-  const leftParts = String(left || '')
-    .trim()
+  const leftParts = toPublicVersionLabel(left, '0.0.0')
     .split('.')
     .map(part => Number(part));
-  const rightParts = String(right || '')
-    .trim()
+  const rightParts = toPublicVersionLabel(right, '0.0.0')
     .split('.')
     .map(part => Number(part));
   const maxLen = Math.max(leftParts.length, rightParts.length, 1);
@@ -186,6 +186,61 @@ function compareVersionStrings(left: string, right: string) {
     if (a < b) return -1;
   }
   return 0;
+}
+
+function toPublicVersionLabel(value: string, fallbackVersion?: string) {
+  const fallback =
+    typeof fallbackVersion === 'string'
+      ? String(fallbackVersion).trim()
+      : APP_CURRENT_VERSION;
+  const raw = String(value || '').trim();
+  if (!raw) {
+    return fallback;
+  }
+  const semverMatch = raw.match(/\d+(?:\.\d+){1,3}/);
+  if (semverMatch?.[0]) {
+    return semverMatch[0];
+  }
+  const digitParts = raw.match(/\d+/g);
+  if (digitParts && digitParts.length >= 2) {
+    return digitParts.slice(0, 4).join('.');
+  }
+  return fallback;
+}
+
+function sanitizePublicReleaseNotes(value: string) {
+  const raw = String(value || '').replace(/\r\n/g, '\n').trim();
+  if (!raw) {
+    return '';
+  }
+
+  const cleanedLines = raw
+    .split('\n')
+    .map(line => String(line || '').replace(/^[\s>*•\-–—]+/, '').trim())
+    .map(line =>
+      line
+        .replace(
+          /\b(?:git\s+commit|commit|sha(?:256)?|checksum|hash|branch|bundle\s*id|package\s*id|version\s*code|build\s*(?:number|code)|channel)\b\s*[:#-]?\s*[A-Za-z0-9._-]+/gi,
+          '',
+        )
+        .replace(/\b[a-f0-9]{7,40}\b/gi, '')
+        .replace(/\b(?:debug|internal|staging|qa)\b/gi, '')
+        .replace(/\s{2,}/g, ' ')
+        .replace(/^[,;:|)\]-\s]+/, '')
+        .replace(/[,;:|(\[-\s]+$/, '')
+        .trim(),
+    )
+    .filter(Boolean)
+    .filter(
+      line =>
+        !/\b(?:current version|previous version|latest version|minimum supported version|published|download size)\b/i.test(line),
+    )
+    .filter(line => /[A-Za-z]/.test(line));
+
+  if (cleanedLines.length === 0) {
+    return 'Bug fixes and performance improvements.';
+  }
+  return cleanedLines.slice(0, 4).join('\n');
 }
 
 function toFeatureChipLabel(value: string) {
@@ -658,7 +713,7 @@ function MainApp() {
   const [itemBrand, setItemBrand] = useState('');
   const [itemCategory, setItemCategory] = useState(DEFAULT_ITEM_CATEGORY);
   const [itemTechnologyOption, setItemTechnologyOption] = useState<ItemTechnologyOption | ''>(DEFAULT_ITEM_TECHNOLOGY);
-  const [itemCapacityAh, setItemCapacityAh] = useState('150Ah');
+  const [itemCapacityAh, setItemCapacityAh] = useState('');
   const [itemQty, setItemQty] = useState('1');
   const [itemReorder, setItemReorder] = useState('8');
   const [itemPurchasePrice, setItemPurchasePrice] = useState('0');
@@ -996,9 +1051,9 @@ function MainApp() {
         return;
       }
 
-      const currentVersion = String((json as any)?.currentVersion || installedVersion).trim() || installedVersion;
-      const latestVersion = String((json as any)?.latestVersion || '').trim();
-      const minimumSupportedVersion = String((json as any)?.minimumSupportedVersion || '').trim();
+      const currentVersion = toPublicVersionLabel(String((json as any)?.currentVersion || installedVersion).trim(), installedVersion);
+      const latestVersion = toPublicVersionLabel(String((json as any)?.latestVersion || '').trim(), '');
+      const minimumSupportedVersion = toPublicVersionLabel(String((json as any)?.minimumSupportedVersion || '').trim(), latestVersion || currentVersion);
       const updateAvailableFromApi = Boolean((json as any)?.updateAvailable);
       const updateAvailable =
         updateAvailableFromApi ||
@@ -1024,7 +1079,7 @@ function MainApp() {
       }
 
       appUpdatePromptedRef.current = true;
-      const releaseNotes = String((json as any)?.releaseNotes || '').trim();
+      const releaseNotes = sanitizePublicReleaseNotes(String((json as any)?.releaseNotes || '').trim());
       const publishedAt = String((json as any)?.publishedAt || '').trim();
       const nextUpdateInfo: AppUpdateInfo = {
         currentVersion,
@@ -1051,10 +1106,7 @@ function MainApp() {
         return;
       }
 
-      const messageParts = [`Current: ${currentVersion}`, `Latest: ${latestVersion}`];
-      if (publishedAt) {
-        messageParts.push(`Published: ${formatIstDateYmd(publishedAt)}`);
-      }
+      const messageParts = [`Latest Version: ${latestVersion}`, `Previous Version: ${currentVersion}`];
       if (releaseNotes) {
         messageParts.push('', releaseNotes);
       }
@@ -2840,7 +2892,7 @@ function MainApp() {
     setItemBrand('');
     setItemCategory(DEFAULT_ITEM_CATEGORY);
     setItemTechnologyOption(DEFAULT_ITEM_TECHNOLOGY);
-    setItemCapacityAh('150Ah');
+    setItemCapacityAh('');
     setItemQty('1');
     setItemReorder('8');
     setItemPurchasePrice('0');
@@ -2862,7 +2914,7 @@ function MainApp() {
     setItemBrand(target.brand || '');
     setItemCategory(target.category || DEFAULT_ITEM_CATEGORY);
     setItemTechnologyOption(target.technologyOption || '');
-    setItemCapacityAh(target.capacityAh || '150Ah');
+    setItemCapacityAh(target.capacityAh || '');
     setItemQty(String(target.qty || 0));
     setItemReorder(String(target.reorderPoint || 0));
     setItemPurchasePrice(String(target.purchasePrice || 0));
@@ -2901,10 +2953,6 @@ function MainApp() {
     const isEditingItem = Boolean(editingItemId);
     if (!itemName.trim() || !itemSku.trim()) {
       Alert.alert('Validation', 'Item Name and HSN/SAC are required.');
-      return;
-    }
-    if (!itemCapacityAh.trim()) {
-      Alert.alert('Validation', 'Capacity is required.');
       return;
     }
     const urlImages = getFilledItemImageUrls(itemImageUrls);
@@ -3239,6 +3287,17 @@ function MainApp() {
     () => (selectedProduct ? getAvailableCapacities(selectedProduct) : []),
     [selectedProduct],
   );
+  const selectedProductDisplayCapacities = useMemo(() => {
+    if (!selectedProduct) {
+      return [...ALL_CAPACITY_OPTIONS];
+    }
+
+    const presetOptions = [...ALL_CAPACITY_OPTIONS];
+    const extraOptions = getCapacityOptions(selectedProduct).filter(
+      cap => !presetOptions.some(option => option.toLowerCase() === cap.toLowerCase()),
+    );
+    return [...presetOptions, ...extraOptions];
+  }, [selectedProduct]);
   const selectedProductTags = useMemo(
     () =>
       Array.isArray(selectedProduct?.tags)
@@ -4883,34 +4942,31 @@ function MainApp() {
         >
           <SafeAreaView style={styles.updateModalBackdrop}>
             <View style={[styles.updateModalCard, { backgroundColor: theme.panel, borderColor: theme.steel }]}>
+              {(() => {
+                const latestVersionLabel = toPublicVersionLabel(availableAppUpdate?.latestVersion || '', APP_CURRENT_VERSION);
+                const previousVersionLabel = toPublicVersionLabel(availableAppUpdate?.currentVersion || '', APP_CURRENT_VERSION);
+                const releaseNotes = sanitizePublicReleaseNotes(availableAppUpdate?.releaseNotes || '');
+                return (
+                  <>
               <Text style={[styles.updateModalEyebrow, { color: availableAppUpdate?.forceUpdate ? theme.orange : theme.accent }]}>
                 {availableAppUpdate?.forceUpdate ? 'Update Required' : 'Update Available'}
               </Text>
               <Text style={[styles.updateModalTitle, { color: theme.text }]}>
-                Version {availableAppUpdate?.latestVersion || APP_CURRENT_VERSION} is ready
+                Latest Version {latestVersionLabel}
               </Text>
               <Text style={[styles.updateModalSubtitle, { color: theme.subtext }]}>
-                Current {availableAppUpdate?.currentVersion || APP_CURRENT_VERSION}
-                {'  '}•{'  '}
-                Minimum {availableAppUpdate?.minimumSupportedVersion || APP_CURRENT_VERSION}
+                Previous Version {previousVersionLabel}
               </Text>
-              {availableAppUpdate?.publishedAt ? (
-                <Text style={[styles.updateModalMeta, { color: theme.subtext }]}>
-                  Published {formatIstDateYmd(availableAppUpdate.publishedAt)}
-                </Text>
-              ) : null}
-              {availableAppUpdate?.fileSizeBytes ? (
-                <Text style={[styles.updateModalMeta, { color: theme.subtext }]}>
-                  Download size {formatByteSize(availableAppUpdate.fileSizeBytes)}
-                </Text>
-              ) : null}
 
-              {availableAppUpdate?.releaseNotes ? (
+              {releaseNotes ? (
                 <View style={[styles.updateModalNotesCard, { backgroundColor: isDarkMode ? theme.panelSoft : '#F7FAF6', borderColor: theme.steel }]}>
                   <Text style={[styles.updateModalNotesLabel, { color: theme.text }]}>Release Notes</Text>
-                  <Text style={[styles.updateModalNotesText, { color: theme.subtext }]}>{availableAppUpdate.releaseNotes}</Text>
+                  <Text style={[styles.updateModalNotesText, { color: theme.subtext }]}>{releaseNotes}</Text>
                 </View>
               ) : null}
+                  </>
+                );
+              })()}
 
               <View style={styles.updateModalProgressWrap}>
                 <View style={[styles.updateModalProgressTrack, { backgroundColor: isDarkMode ? '#1F2937' : '#E5E7EB' }]}>
@@ -5456,7 +5512,7 @@ function MainApp() {
 
                       <Text style={[styles.itemText, { color: theme.text }]}>Battery Capacity</Text>
                       <View style={styles.capacityRow}>
-                        {getCapacityOptions(selectedProduct).map(cap => {
+                        {selectedProductDisplayCapacities.map(cap => {
                           const isAvailable = selectedProductAvailableCapacities.includes(cap);
                           return (
                           <Pressable
@@ -5712,6 +5768,7 @@ function MainApp() {
                   viewMoreProducts.map(product => {
                     const productCartQty = cartQtyByProductId[product.id] || 0;
                     const isFeaturedView = viewMoreContext === 'featured';
+                    const productDiscountPct = getDetailPrice(product).discountPct;
                     return (
                       <Pressable
                         key={product.id}
@@ -5721,6 +5778,7 @@ function MainApp() {
                         }}
                         style={[styles.productListRow, { backgroundColor: theme.panelSoft }]}
                       >
+                        <ProductDiscountStrip discountPct={productDiscountPct} isDarkMode={profileDarkMode} />
                         <Image
                           source={{ uri: product.thumbnail }}
                           style={[styles.productListImage, profileDarkMode && styles.productListImageDark]}
@@ -5794,6 +5852,7 @@ function MainApp() {
       <StatusBar barStyle="light-content" />
       <ScrollView
         removeClippedSubviews
+        keyboardShouldPersistTaps="always"
         contentContainerStyle={{
           paddingTop: Math.max(10, insets.top),
           paddingHorizontal: horizontalScreenPadding,
@@ -5860,22 +5919,29 @@ function MainApp() {
                 key={m.id}
                 onPress={() => setModuleId(m.id)}
                 style={[
-                  styles.chip,
+                  styles.adminNavChip,
                   styles.navSliderChip,
-                  active
-                    ? {
-                        backgroundColor: theme.primary,
-                        borderWidth: 1,
-                        borderColor: theme.primary,
-                      }
-                    : {
-                        backgroundColor: theme.steel,
-                        borderWidth: 1,
-                        borderColor: theme.steel,
-                      },
+                  isDarkMode
+                    ? active
+                      ? styles.adminNavChipDarkActive
+                      : styles.adminNavChipDark
+                    : active
+                      ? styles.adminNavChipLightActive
+                      : styles.adminNavChipLight,
                 ]}
               >
-                <Text style={[styles.chipText, active ? { color: '#FFFFFF' } : { color: theme.text }]}>{m.label}</Text>
+                <Text
+                  style={[
+                    styles.adminNavChipText,
+                    active
+                      ? isDarkMode
+                        ? styles.adminNavChipTextDarkActive
+                        : styles.adminNavChipTextLightActive
+                      : { color: theme.text },
+                  ]}
+                >
+                  {m.label}
+                </Text>
               </Pressable>
             );
           })}

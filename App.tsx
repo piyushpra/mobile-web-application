@@ -99,7 +99,7 @@ function App() {
           <StatusBar barStyle="dark-content" backgroundColor="#F5F7F3" />
           <Image source={APP_LOGO_IMAGE} style={styles.startupLogo} resizeMode="contain" />
           <Text style={styles.startupTitle}>FuElectric</Text>
-          <Text style={styles.startupSubtitle}>BY DAYAL ELECTRONICS</Text>
+          <Text style={styles.startupSubtitle}>By Dayal Electronics</Text>
         </View>
       ) : (
         <MainApp />

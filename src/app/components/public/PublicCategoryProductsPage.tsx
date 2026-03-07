@@ -4,7 +4,8 @@ import { Image, Modal, Pressable, Text, TextInput, View } from 'react-native';
 import { LANDING_HERO_IMAGE, darkTheme } from '../../constants';
 import styles from '../../styles';
 import type { LandingCategory, PublicProduct, Theme } from '../../types';
-import { getLandingProductModel, getLandingProductTitle } from '../../utils/publicCatalog';
+import { getDetailPrice, getLandingProductModel, getLandingProductTitle } from '../../utils/publicCatalog';
+import ProductDiscountStrip from './ProductDiscountStrip';
 
 export type CategoryBrowseCard = {
   id: string;
@@ -213,24 +214,28 @@ function PublicCategoryProductsPage({ theme, card, products, onBack, onOpenProdu
       ) : null}
 
       <View style={styles.categoryProductsGrid}>
-        {visibleProducts.map(product => (
-          <View key={product.id} style={[styles.categoryProductsCard, { borderBottomColor: theme.steel }]}>
-            <Image
-              source={{ uri: product.thumbnail }}
-              style={[styles.categoryProductsCardImage, isDarkMode && styles.categoryProductsCardImageDark]}
-              resizeMode="contain"
-            />
-            <Text style={[styles.categoryProductsCardName, { color: theme.text }]} numberOfLines={2}>
-              {getLandingProductTitle(product)}
-            </Text>
-            <Text style={[styles.categoryProductsCardModel, { color: theme.subtext }]} numberOfLines={1}>
-              {getLandingProductModel(product)}
-            </Text>
-            <Pressable style={[styles.categoryProductsCardBtn, { backgroundColor: theme.accent }]} onPress={() => onOpenProduct(product.id)}>
-              <Text style={[styles.categoryProductsCardBtnText, { color: theme.panel }]}>View Details</Text>
-            </Pressable>
-          </View>
-        ))}
+        {visibleProducts.map(product => {
+          const productDiscountPct = getDetailPrice(product).discountPct;
+          return (
+            <View key={product.id} style={[styles.categoryProductsCard, { borderBottomColor: theme.steel }]}>
+              <ProductDiscountStrip discountPct={productDiscountPct} isDarkMode={isDarkMode} />
+              <Image
+                source={{ uri: product.thumbnail }}
+                style={[styles.categoryProductsCardImage, isDarkMode && styles.categoryProductsCardImageDark]}
+                resizeMode="contain"
+              />
+              <Text style={[styles.categoryProductsCardName, { color: theme.text }]} numberOfLines={2}>
+                {getLandingProductTitle(product)}
+              </Text>
+              <Text style={[styles.categoryProductsCardModel, { color: theme.subtext }]} numberOfLines={1}>
+                {getLandingProductModel(product)}
+              </Text>
+              <Pressable style={[styles.categoryProductsCardBtn, { backgroundColor: theme.accent }]} onPress={() => onOpenProduct(product.id)}>
+                <Text style={[styles.categoryProductsCardBtnText, { color: theme.panel }]}>View Details</Text>
+              </Pressable>
+            </View>
+          );
+        })}
       </View>
 
       {visibleProducts.length === 0 ? (

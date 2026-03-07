@@ -4,7 +4,8 @@ import { ActivityIndicator, FlatList, Image, Pressable, ScrollView, Text, View }
 import { LANDING_HERO_IMAGE, darkTheme } from '../../constants';
 import styles from '../../styles';
 import type { CartItem, LandingCategory, PublicProduct, PublicView, Theme } from '../../types';
-import { getLandingProductModel, getLandingProductTitle, getOfferLabel } from '../../utils/publicCatalog';
+import { getDetailPrice, getLandingProductModel, getLandingProductTitle, getOfferLabel } from '../../utils/publicCatalog';
+import ProductDiscountStrip from './ProductDiscountStrip';
 import PublicCategoryProductsPage, { type CategoryBrowseCard } from './PublicCategoryProductsPage';
 
 type CategoryCard = {
@@ -130,8 +131,10 @@ function PublicCatalogSections({
   const renderAllProductRow = React.useCallback(
     ({ item }: { item: PublicProduct }) => {
       const productCartQty = cartQtyByProductId[item.id] || 0;
+      const productDiscountPct = getDetailPrice(item).discountPct;
       return (
         <Pressable onPress={() => openProductDetail(item.id)} style={[styles.productListRow, { backgroundColor: theme.panelSoft }]}>
+          <ProductDiscountStrip discountPct={productDiscountPct} isDarkMode={isDarkMode} />
           <Image
             source={{ uri: item.thumbnail }}
             style={[styles.productListImage, isDarkMode && styles.productListImageDark]}
@@ -351,12 +354,14 @@ function PublicCatalogSections({
             ) : (
               landingPreviewProducts.map(product => {
                 const productCartQty = cartQtyByProductId[product.id] || 0;
+                const productDiscountPct = getDetailPrice(product).discountPct;
                 return (
                   <Pressable
                     key={`cat_${product.id}`}
                     onPress={() => openProductDetail(product.id)}
                     style={[styles.productListRow, { backgroundColor: theme.panelSoft }]}
                   >
+                    <ProductDiscountStrip discountPct={productDiscountPct} isDarkMode={isDarkMode} />
                     <Image
                       source={{ uri: product.thumbnail }}
                       style={[styles.productListImage, isDarkMode && styles.productListImageDark]}
@@ -395,9 +400,11 @@ function PublicCatalogSections({
               {featuredPreviewProducts.map(product => {
                 const offerLabel = getOfferLabel(product);
                 const productCartQty = cartQtyByProductId[product.id] || 0;
+                const productDiscountPct = getDetailPrice(product).discountPct;
                 return (
                   <View key={product.id} style={[styles.productTile, styles.featuredProductTile, { backgroundColor: theme.panelSoft }]}> 
-                    {offerLabel ? (
+                    <ProductDiscountStrip discountPct={productDiscountPct} isDarkMode={isDarkMode} />
+                    {productDiscountPct <= 0 && offerLabel ? (
                       <View style={[styles.dealBadge, { backgroundColor: '#F59E0B' }]}>
                         <Text style={styles.dealBadgeText}>{offerLabel}</Text>
                       </View>

@@ -650,12 +650,10 @@ function buildInvoiceDocument({
 }
 
 function compareAppVersions(left, right) {
-  const leftParts = String(left || '')
-    .trim()
+  const leftParts = sanitizePublicVersionLabel(left, '0.0.0')
     .split('.')
     .map(part => parseNumber(part, 0));
-  const rightParts = String(right || '')
-    .trim()
+  const rightParts = sanitizePublicVersionLabel(right, '0.0.0')
     .split('.')
     .map(part => parseNumber(part, 0));
   const maxLen = Math.max(leftParts.length, rightParts.length, 1);
@@ -1038,10 +1036,62 @@ function getDefaultAppUpdateManifest() {
   };
 }
 
+function sanitizePublicVersionLabel(value, fallbackVersion = '1.0.0') {
+  const fallback = String(fallbackVersion || '1.0.0').trim() || '1.0.0';
+  const raw = String(value || '').trim();
+  if (!raw) {
+    return fallback;
+  }
+  const semverMatch = raw.match(/\d+(?:\.\d+){1,3}/);
+  if (semverMatch?.[0]) {
+    return semverMatch[0];
+  }
+  const digitParts = raw.match(/\d+/g);
+  if (digitParts && digitParts.length >= 2) {
+    return digitParts.slice(0, 4).join('.');
+  }
+  return fallback;
+}
+
+function sanitizePublicReleaseNotes(value) {
+  const raw = String(value || '').replace(/\r\n/g, '\n').trim();
+  if (!raw) {
+    return '';
+  }
+
+  const cleanedLines = raw
+    .split('\n')
+    .map(line => String(line || '').replace(/^[\s>*•\-–—]+/, '').trim())
+    .map(line =>
+      line
+        .replace(
+          /\b(?:git\s+commit|commit|sha(?:256)?|checksum|hash|branch|bundle\s*id|package\s*id|version\s*code|build\s*(?:number|code)|channel)\b\s*[:#-]?\s*[A-Za-z0-9._-]+/gi,
+          '',
+        )
+        .replace(/\b[a-f0-9]{7,40}\b/gi, '')
+        .replace(/\b(?:debug|internal|staging|qa)\b/gi, '')
+        .replace(/\s{2,}/g, ' ')
+        .replace(/^[,;:|)\]-\s]+/, '')
+        .replace(/[,;:|(\[-\s]+$/, '')
+        .trim(),
+    )
+    .filter(Boolean)
+    .filter(
+      line =>
+        !/\b(?:current version|previous version|latest version|minimum supported version|published|download size)\b/i.test(line),
+    )
+    .filter(line => /[A-Za-z]/.test(line));
+
+  if (cleanedLines.length === 0) {
+    return 'Bug fixes and performance improvements.';
+  }
+  return cleanedLines.slice(0, 4).join('\n');
+}
+
 function normalizeAppUpdateEntry(entry, fallbackVersion = '1.0.0') {
   const fallback = String(fallbackVersion || '1.0.0').trim() || '1.0.0';
-  const latestVersion = String(entry?.latestVersion || fallback).trim() || fallback;
-  const minimumSupportedVersion = String(entry?.minimumSupportedVersion || latestVersion).trim() || latestVersion;
+  const latestVersion = sanitizePublicVersionLabel(entry?.latestVersion || fallback, fallback);
+  const minimumSupportedVersion = sanitizePublicVersionLabel(entry?.minimumSupportedVersion || latestVersion, latestVersion);
   return {
     appId: String(entry?.appId || '').trim(),
     channel: String(entry?.channel || 'production').trim().toLowerCase() || 'production',
@@ -1049,7 +1099,7 @@ function normalizeAppUpdateEntry(entry, fallbackVersion = '1.0.0') {
     minimumSupportedVersion,
     mandatory: Boolean(entry?.mandatory),
     downloadUrl: String(entry?.downloadUrl || '').trim(),
-    releaseNotes: String(entry?.releaseNotes || '').trim(),
+    releaseNotes: sanitizePublicReleaseNotes(entry?.releaseNotes),
     publishedAt: String(entry?.publishedAt || '').trim(),
     checksumSha256: String(entry?.checksumSha256 || '').trim().toLowerCase(),
     fileSizeBytes: Math.max(0, parseNumber(entry?.fileSizeBytes, 0)),
@@ -1111,7 +1161,7 @@ const ITEM_TAGS = ['bestseller', 'premium'];
 function normalizeCapacityAh(value) {
   const raw = String(value || '').trim();
   if (!raw) {
-    return '150Ah';
+    return '';
   }
   const preset = AH_OPTIONS.find(option => option.toLowerCase() === raw.toLowerCase());
   if (preset) {
@@ -5188,7 +5238,7 @@ const server = http.createServer(async (req, res) => {
         return;
       }
       const platform = platformRaw;
-      const currentVersion = String(searchParams.get('currentVersion') || '').trim() || '0.0.0';
+      const currentVersion = sanitizePublicVersionLabel(searchParams.get('currentVersion') || '', '0.0.0');
       const manifest = await readAppUpdateManifest();
       const entry = platform === 'ios' ? manifest.ios : manifest.android;
       if (entry.channel && entry.channel !== channel) {

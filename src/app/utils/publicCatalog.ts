@@ -50,7 +50,9 @@ export const getOfferLabel = (product: PublicProduct): string | null => {
   return null;
 };
 
-export const getDetailPrice = (product: PublicProductDetail) => {
+type ProductPricingSource = Pick<PublicProduct, 'purchasePrice' | 'sellingPrice' | 'discountPct'>;
+
+export const getDetailPrice = (product: ProductPricingSource) => {
   const purchasePrice = Math.max(0, Number(product.purchasePrice || 0));
   const sellingPrice = Math.max(0, Number(product.sellingPrice || 0));
   const base = Math.round(sellingPrice > 0 ? sellingPrice : purchasePrice);
@@ -83,7 +85,15 @@ export const getAvailableCapacities = (product: PublicProductDetail) => {
 
 export const getCapacityOptions = (product: PublicProductDetail) => {
   const available = getAvailableCapacities(product);
-  return available.length > 0 ? available : [...ALL_CAPACITY_OPTIONS];
+  if (available.length === 0) {
+    return [...ALL_CAPACITY_OPTIONS];
+  }
+
+  const presetOptions = [...ALL_CAPACITY_OPTIONS];
+  const extraAvailable = available.filter(
+    cap => !presetOptions.some(option => option.toLowerCase() === cap.toLowerCase()),
+  );
+  return [...presetOptions, ...sortCapacityLabels(extraAvailable)];
 };
 
 export const locationMatchesQuery = (loc: DeliveryLocation, query: string) => {
