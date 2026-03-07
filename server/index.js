@@ -2301,6 +2301,132 @@ async function ensureDb() {
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
       );
 
+      await conn.query(
+        `CREATE TABLE IF NOT EXISTS locations (
+          id VARCHAR(64) NOT NULL,
+          label VARCHAR(220) NOT NULL,
+          area VARCHAR(120) NULL,
+          city VARCHAR(120) NULL,
+          state VARCHAR(120) NULL,
+          country VARCHAR(120) NOT NULL DEFAULT 'India',
+          pincode VARCHAR(12) NULL,
+          lat DECIMAL(10,7) NULL,
+          lng DECIMAL(10,7) NULL,
+          source ENUM('default', 'manual', 'gps', 'network', 'search') NOT NULL DEFAULT 'manual',
+          created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+          PRIMARY KEY (id),
+          KEY idx_locations_city_state_pin (city, state, pincode),
+          CONSTRAINT chk_locations_lat CHECK (lat IS NULL OR (lat >= -90 AND lat <= 90)),
+          CONSTRAINT chk_locations_lng CHECK (lng IS NULL OR (lng >= -180 AND lng <= 180))
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+      );
+
+      await conn.query(
+        `CREATE TABLE IF NOT EXISTS location_profiles (
+          id VARCHAR(64) NOT NULL,
+          user_id VARCHAR(64) NULL,
+          guest_id VARCHAR(60) NULL,
+          current_location_id VARCHAR(64) NULL,
+          created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+          PRIMARY KEY (id),
+          UNIQUE KEY uq_location_profiles_user_id (user_id),
+          UNIQUE KEY uq_location_profiles_guest_id (guest_id),
+          KEY idx_location_profiles_current_location (current_location_id),
+          CONSTRAINT fk_location_profiles_user
+            FOREIGN KEY (user_id) REFERENCES users(id)
+            ON DELETE CASCADE
+            ON UPDATE CASCADE,
+          CONSTRAINT fk_location_profiles_current_location
+            FOREIGN KEY (current_location_id) REFERENCES locations(id)
+            ON DELETE SET NULL
+            ON UPDATE CASCADE,
+          CONSTRAINT chk_location_profiles_owner
+            CHECK ((user_id IS NOT NULL AND guest_id IS NULL) OR (user_id IS NULL AND guest_id IS NOT NULL))
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+      );
+
+      await conn.query(
+        `CREATE TABLE IF NOT EXISTS location_saved (
+          profile_id VARCHAR(64) NOT NULL,
+          location_id VARCHAR(64) NOT NULL,
+          created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          PRIMARY KEY (profile_id, location_id),
+          CONSTRAINT fk_location_saved_profile
+            FOREIGN KEY (profile_id) REFERENCES location_profiles(id)
+            ON DELETE CASCADE
+            ON UPDATE CASCADE,
+          CONSTRAINT fk_location_saved_location
+            FOREIGN KEY (location_id) REFERENCES locations(id)
+            ON DELETE CASCADE
+            ON UPDATE CASCADE
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+      );
+
+      await conn.query(
+        `CREATE TABLE IF NOT EXISTS location_recent (
+          id VARCHAR(64) NOT NULL,
+          profile_id VARCHAR(64) NOT NULL,
+          location_id VARCHAR(64) NOT NULL,
+          seen_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          PRIMARY KEY (id),
+          UNIQUE KEY uq_location_recent_profile_location (profile_id, location_id),
+          KEY idx_location_recent_profile_seen (profile_id, seen_at),
+          CONSTRAINT fk_location_recent_profile
+            FOREIGN KEY (profile_id) REFERENCES location_profiles(id)
+            ON DELETE CASCADE
+            ON UPDATE CASCADE,
+          CONSTRAINT fk_location_recent_location
+            FOREIGN KEY (location_id) REFERENCES locations(id)
+            ON DELETE CASCADE
+            ON UPDATE CASCADE
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+      );
+
+      await conn.query(
+        `CREATE TABLE IF NOT EXISTS location_suggestions (
+          id VARCHAR(64) NOT NULL,
+          location_id VARCHAR(64) NOT NULL,
+          rank_score INT NOT NULL DEFAULT 0,
+          created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          PRIMARY KEY (id),
+          UNIQUE KEY uq_location_suggestions_location (location_id),
+          KEY idx_location_suggestions_rank (rank_score, created_at),
+          CONSTRAINT fk_location_suggestions_location
+            FOREIGN KEY (location_id) REFERENCES locations(id)
+            ON DELETE CASCADE
+            ON UPDATE CASCADE
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+      );
+
+      await conn.query(
+        `CREATE TABLE IF NOT EXISTS invoice_seller_settings (
+          id VARCHAR(32) NOT NULL,
+          seller_name VARCHAR(160) NOT NULL,
+          seller_gstin VARCHAR(20) NULL,
+          seller_address TEXT NOT NULL,
+          seller_state VARCHAR(80) NOT NULL,
+          seller_phone VARCHAR(30) NULL,
+          seller_email VARCHAR(160) NULL,
+          seller_website VARCHAR(200) NULL,
+          seller_pan VARCHAR(20) NULL,
+          bank_account_name VARCHAR(160) NULL,
+          bank_account_number VARCHAR(80) NULL,
+          bank_ifsc VARCHAR(20) NULL,
+          bank_branch VARCHAR(160) NULL,
+          declaration_note TEXT NULL,
+          footer_note TEXT NULL,
+          updated_by VARCHAR(64) NULL,
+          updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+          PRIMARY KEY (id),
+          CONSTRAINT fk_invoice_seller_settings_updated_by
+            FOREIGN KEY (updated_by) REFERENCES users(id)
+            ON DELETE SET NULL
+            ON UPDATE CASCADE
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+      );
+
       const requiredTables = [
         'users',
         'password_reset_tokens',

@@ -30,10 +30,12 @@ export const darkTheme: Theme = {
   warning: '#FACC15',
 };
 
+const PUBLIC_API_ORIGIN = 'http://13.235.49.124:4000';
+
 export const API_BASE = Platform.select({
-  android: 'http://13.235.49.124',
-  ios: 'http://13.235.49.124',
-  default: 'http://13.235.49.124',
+  android: PUBLIC_API_ORIGIN,
+  ios: PUBLIC_API_ORIGIN,
+  default: PUBLIC_API_ORIGIN,
 });
 export const APP_CURRENT_VERSION = '1.0.0';
 export const APP_UPDATE_APP_ID = 'com.mobile';

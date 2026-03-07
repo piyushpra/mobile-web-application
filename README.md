@@ -144,7 +144,7 @@ Required config in [config/production.env](/Users/piyush/Downloads/my-personal-a
 
 ```sh
 APP_NAME=Mobile Application
-AUTH_PUBLIC_BASE_URL=http://13.235.49.124
+AUTH_PUBLIC_BASE_URL=http://13.235.49.124:4000
 AUTH_RESET_TOKEN_TTL_MS=900000
 AUTH_RESET_REQUEST_COOLDOWN_MS=60000
 
