@@ -122,6 +122,16 @@ const DEFAULT_INVOICE_SELLER = Object.freeze({
   sellerGstin: '',
   sellerAddress: 'New Delhi, Delhi, India',
   sellerState: 'Delhi',
+  sellerPhone: '',
+  sellerEmail: '',
+  sellerWebsite: '',
+  sellerPan: '',
+  bankAccountName: '',
+  bankAccountNumber: '',
+  bankIfsc: '',
+  bankBranch: '',
+  declarationNote: '',
+  footerNote: '',
 });
 const INVOICE_DOWNLOAD_LINK_TTL_MS = 1000 * 60 * 15;
 const INVOICE_DOWNLOAD_SECRET = crypto
@@ -174,8 +184,136 @@ function normalizeStateKey(value) {
   return compactText(value).toLowerCase().replace(/[^a-z]/g, '');
 }
 
-function getInvoiceSellerProfile() {
-  return { ...DEFAULT_INVOICE_SELLER };
+function normalizeInvoiceSellerProfile(value) {
+  const source = value || {};
+  return {
+    sellerName: compactText(source.sellerName) || DEFAULT_INVOICE_SELLER.sellerName,
+    sellerGstin: compactText(source.sellerGstin).toUpperCase(),
+    sellerAddress: compactText(source.sellerAddress) || DEFAULT_INVOICE_SELLER.sellerAddress,
+    sellerState: compactText(source.sellerState) || DEFAULT_INVOICE_SELLER.sellerState,
+    sellerPhone: compactText(source.sellerPhone),
+    sellerEmail: compactText(source.sellerEmail),
+    sellerWebsite: compactText(source.sellerWebsite),
+    sellerPan: compactText(source.sellerPan).toUpperCase(),
+    bankAccountName: compactText(source.bankAccountName),
+    bankAccountNumber: compactText(source.bankAccountNumber),
+    bankIfsc: compactText(source.bankIfsc).toUpperCase(),
+    bankBranch: compactText(source.bankBranch),
+    declarationNote: compactText(source.declarationNote),
+    footerNote: compactText(source.footerNote),
+  };
+}
+
+function getDefaultInvoiceSellerProfile() {
+  return normalizeInvoiceSellerProfile(DEFAULT_INVOICE_SELLER);
+}
+
+function validateInvoiceSellerProfileInput(value) {
+  const profile = normalizeInvoiceSellerProfile(value);
+  if (!profile.sellerName) {
+    return 'Seller name is required';
+  }
+  if (!profile.sellerAddress) {
+    return 'Seller address is required';
+  }
+  if (!profile.sellerState) {
+    return 'Seller state is required';
+  }
+  if (profile.sellerGstin && !/^[0-9A-Z]{15}$/.test(profile.sellerGstin)) {
+    return 'GSTIN must be 15 characters';
+  }
+  if (profile.sellerEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(profile.sellerEmail)) {
+    return 'Seller email is invalid';
+  }
+  if (profile.bankIfsc && !/^[A-Z]{4}0[A-Z0-9]{6}$/.test(profile.bankIfsc)) {
+    return 'IFSC code is invalid';
+  }
+  return null;
+}
+
+async function fetchInvoiceSellerProfile(conn = null) {
+  const executor = conn || mysqlPool;
+  const [rows] = await executor.query(
+    `SELECT seller_name,
+            seller_gstin,
+            seller_address,
+            seller_state,
+            seller_phone,
+            seller_email,
+            seller_website,
+            seller_pan,
+            bank_account_name,
+            bank_account_number,
+            bank_ifsc,
+            bank_branch,
+            declaration_note,
+            footer_note
+     FROM invoice_seller_settings
+     WHERE id = 'default'
+     LIMIT 1`,
+  );
+  const row = Array.isArray(rows) ? rows[0] : null;
+  return normalizeInvoiceSellerProfile({
+    sellerName: row?.seller_name,
+    sellerGstin: row?.seller_gstin,
+    sellerAddress: row?.seller_address,
+    sellerState: row?.seller_state,
+    sellerPhone: row?.seller_phone,
+    sellerEmail: row?.seller_email,
+    sellerWebsite: row?.seller_website,
+    sellerPan: row?.seller_pan,
+    bankAccountName: row?.bank_account_name,
+    bankAccountNumber: row?.bank_account_number,
+    bankIfsc: row?.bank_ifsc,
+    bankBranch: row?.bank_branch,
+    declarationNote: row?.declaration_note,
+    footerNote: row?.footer_note,
+  });
+}
+
+async function upsertInvoiceSellerProfile(conn, value, updatedBy = null) {
+  const profile = normalizeInvoiceSellerProfile(value);
+  await conn.query(
+    `INSERT INTO invoice_seller_settings
+      (id, seller_name, seller_gstin, seller_address, seller_state, seller_phone, seller_email, seller_website,
+       seller_pan, bank_account_name, bank_account_number, bank_ifsc, bank_branch, declaration_note, footer_note, updated_by)
+     VALUES ('default', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON DUPLICATE KEY UPDATE
+       seller_name = VALUES(seller_name),
+       seller_gstin = VALUES(seller_gstin),
+       seller_address = VALUES(seller_address),
+       seller_state = VALUES(seller_state),
+       seller_phone = VALUES(seller_phone),
+       seller_email = VALUES(seller_email),
+       seller_website = VALUES(seller_website),
+       seller_pan = VALUES(seller_pan),
+       bank_account_name = VALUES(bank_account_name),
+       bank_account_number = VALUES(bank_account_number),
+       bank_ifsc = VALUES(bank_ifsc),
+       bank_branch = VALUES(bank_branch),
+       declaration_note = VALUES(declaration_note),
+       footer_note = VALUES(footer_note),
+       updated_by = VALUES(updated_by),
+       updated_at = CURRENT_TIMESTAMP`,
+    [
+      profile.sellerName,
+      profile.sellerGstin || null,
+      profile.sellerAddress,
+      profile.sellerState,
+      profile.sellerPhone || null,
+      profile.sellerEmail || null,
+      profile.sellerWebsite || null,
+      profile.sellerPan || null,
+      profile.bankAccountName || null,
+      profile.bankAccountNumber || null,
+      profile.bankIfsc || null,
+      profile.bankBranch || null,
+      profile.declarationNote || null,
+      profile.footerNote || null,
+      updatedBy || null,
+    ],
+  );
+  return fetchInvoiceSellerProfile(conn);
 }
 
 function buildLocationAddress(location) {
@@ -306,8 +444,11 @@ function decorateInvoiceLine(line) {
   };
 }
 
-function decorateInvoiceDocument(invoice) {
-  const seller = getInvoiceSellerProfile();
+function decorateInvoiceDocument(invoice, sellerProfile = null) {
+  const seller = normalizeInvoiceSellerProfile({
+    ...(sellerProfile || {}),
+    ...(invoice || {}),
+  });
   const lines = (Array.isArray(invoice.lines) ? invoice.lines : []).map(decorateInvoiceLine);
   const subtotal = clamp2(
     parseNumber(
@@ -413,8 +554,9 @@ function buildInvoiceDocument({
   placeOfSupply,
   placeOfSupplyState = '',
   lines = [],
+  sellerProfile = null,
 }) {
-  const seller = getInvoiceSellerProfile();
+  const seller = normalizeInvoiceSellerProfile(sellerProfile);
   const preparedLines = Array.isArray(lines) ? lines : [];
   const grossSubtotal = clamp2(
     preparedLines.reduce((sum, line) => sum + clamp2(Math.max(0, parseNumber(line.unitPrice, 0)) * Math.max(0, parseNumber(line.qty, 0))), 0),
@@ -498,7 +640,7 @@ function buildInvoiceDocument({
     shipToAddress,
     placeOfSupply,
     lines: computedLines,
-  });
+  }, seller);
 
   return {
     ...decorated,
@@ -1625,6 +1767,491 @@ function formatCurrencyInrForHtml(value) {
   return `Rs ${Number(value || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
+function formatCurrencyInrForPdf(value) {
+  return `INR ${Number(value || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
+
+function escapePdfText(value) {
+  return String(value || '')
+    .replace(/\\/g, '\\\\')
+    .replace(/\(/g, '\\(')
+    .replace(/\)/g, '\\)')
+    .replace(/\r/g, '')
+    .replace(/\n/g, ' ');
+}
+
+function estimatePdfTextWidth(text, fontSize, fontKey = 'F1') {
+  const factor = fontKey === 'F2' ? 0.56 : 0.52;
+  return String(text || '').length * fontSize * factor;
+}
+
+function wrapPdfText(value, maxWidth, fontSize, fontKey = 'F1', maxLines = 0) {
+  const rawLines = String(value || '')
+    .split(/\r?\n/)
+    .map(line => line.trim())
+    .filter(Boolean);
+  const baseLines = rawLines.length > 0 ? rawLines : [''];
+  const result = [];
+  for (const rawLine of baseLines) {
+    const words = rawLine.split(/\s+/).filter(Boolean);
+    if (words.length === 0) {
+      result.push('');
+      continue;
+    }
+    let current = words[0];
+    for (let index = 1; index < words.length; index += 1) {
+      const word = words[index];
+      const candidate = `${current} ${word}`;
+      if (estimatePdfTextWidth(candidate, fontSize, fontKey) <= maxWidth) {
+        current = candidate;
+      } else {
+        result.push(current);
+        current = word;
+      }
+    }
+    result.push(current);
+  }
+  if (maxLines > 0 && result.length > maxLines) {
+    const clipped = result.slice(0, maxLines);
+    const lastLine = clipped[maxLines - 1] || '';
+    clipped[maxLines - 1] = `${lastLine.replace(/\s+$/, '')}...`;
+    return clipped;
+  }
+  return result;
+}
+
+function getInvoiceTaxBreakdown(invoice) {
+  const safeInvoice = invoice || {};
+  const lines = Array.isArray(safeInvoice.lines) ? safeInvoice.lines : [];
+  const lineTaxableTotal = clamp2(lines.reduce((sum, line) => sum + parseNumber(line.taxableValue, 0), 0));
+  const lineGstTotal = clamp2(lines.reduce((sum, line) => sum + parseNumber(line.gstAmount, 0), 0));
+  const lineCgstTotal = clamp2(lines.reduce((sum, line) => sum + parseNumber(line.cgstAmount, 0), 0));
+  const lineSgstTotal = clamp2(lines.reduce((sum, line) => sum + parseNumber(line.sgstAmount, 0), 0));
+  const lineIgstTotal = clamp2(lines.reduce((sum, line) => sum + parseNumber(line.igstAmount, 0), 0));
+  const deliveryFee = clamp2(parseNumber(safeInvoice.deliveryFee, 0));
+  const taxableBase = clamp2(Math.max(0, parseNumber(safeInvoice.total, 0) - deliveryFee));
+  const taxableTotal = clamp2(
+    parseNumber(
+      safeInvoice.taxableTotal,
+      lineTaxableTotal > 0 ? lineTaxableTotal : Math.max(0, taxableBase - parseNumber(safeInvoice.gstTotal, 0)),
+    ),
+  );
+  let gstTotal = clamp2(parseNumber(safeInvoice.gstTotal, lineGstTotal));
+  if (gstTotal <= 0 && taxableBase > taxableTotal) {
+    gstTotal = clamp2(taxableBase - taxableTotal);
+  }
+  const intraState = shouldSplitGstToCgstSgst({
+    sellerState: safeInvoice.sellerState,
+    placeOfSupplyState: safeInvoice.placeOfSupply,
+    shipToAddress: safeInvoice.shipToAddress || safeInvoice.billToAddress,
+  });
+  let cgstTotal = clamp2(parseNumber(safeInvoice.cgstTotal, lineCgstTotal));
+  let sgstTotal = clamp2(parseNumber(safeInvoice.sgstTotal, lineSgstTotal));
+  let igstTotal = clamp2(parseNumber(safeInvoice.igstTotal, lineIgstTotal));
+  if (gstTotal > 0 && cgstTotal <= 0 && sgstTotal <= 0 && igstTotal <= 0) {
+    if (intraState) {
+      cgstTotal = clamp2(gstTotal / 2);
+      sgstTotal = clamp2(gstTotal - cgstTotal);
+    } else {
+      igstTotal = gstTotal;
+    }
+  }
+  return {
+    taxableTotal,
+    gstTotal,
+    cgstTotal,
+    sgstTotal,
+    igstTotal,
+    intraState,
+  };
+}
+
+function renderPdfDocument(pageStreams) {
+  const safePageStreams = Array.isArray(pageStreams) ? pageStreams.filter(Boolean) : [];
+  const pagesCount = safePageStreams.length || 1;
+  const fontRegularId = 1;
+  const fontBoldId = 2;
+  const catalogId = 3;
+  const pagesId = 4;
+  const objects = [];
+  objects[fontRegularId - 1] = '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>';
+  objects[fontBoldId - 1] = '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>';
+  objects[catalogId - 1] = `<< /Type /Catalog /Pages ${pagesId} 0 R >>`;
+
+  const pageObjectIds = [];
+  const contentObjectIds = [];
+  for (let index = 0; index < pagesCount; index += 1) {
+    contentObjectIds.push(5 + index * 2);
+    pageObjectIds.push(6 + index * 2);
+  }
+  objects[pagesId - 1] = `<< /Type /Pages /Count ${pagesCount} /Kids [${pageObjectIds.map(id => `${id} 0 R`).join(' ')}] >>`;
+
+  safePageStreams.forEach((stream, index) => {
+    const contentId = contentObjectIds[index];
+    const pageId = pageObjectIds[index];
+    const contentBuffer = Buffer.from(String(stream || ''), 'binary');
+    objects[contentId - 1] = `<< /Length ${contentBuffer.length} >>\nstream\n${contentBuffer.toString('binary')}\nendstream`;
+    objects[pageId - 1] =
+      `<< /Type /Page /Parent ${pagesId} 0 R /MediaBox [0 0 595 842] ` +
+      `/Resources << /Font << /F1 ${fontRegularId} 0 R /F2 ${fontBoldId} 0 R >> >> ` +
+      `/Contents ${contentId} 0 R >>`;
+  });
+
+  let pdf = '%PDF-1.4\n%\xC7\xEC\x8F\xA2\n';
+  const offsets = [0];
+  for (let index = 0; index < objects.length; index += 1) {
+    offsets.push(Buffer.byteLength(pdf, 'binary'));
+    pdf += `${index + 1} 0 obj\n${objects[index]}\nendobj\n`;
+  }
+  const xrefOffset = Buffer.byteLength(pdf, 'binary');
+  pdf += `xref\n0 ${objects.length + 1}\n`;
+  pdf += '0000000000 65535 f \n';
+  for (let index = 1; index < offsets.length; index += 1) {
+    pdf += `${String(offsets[index]).padStart(10, '0')} 00000 n \n`;
+  }
+  pdf += `trailer\n<< /Size ${objects.length + 1} /Root ${catalogId} 0 R >>\nstartxref\n${xrefOffset}\n%%EOF`;
+  return Buffer.from(pdf, 'binary');
+}
+
+function renderStorefrontInvoicePdf(order, invoice) {
+  const safeOrder = order || {};
+  const safeInvoice = decorateInvoiceDocument(invoice);
+  const taxBreakdown = getInvoiceTaxBreakdown(safeInvoice);
+  const pageWidth = 595;
+  const pageHeight = 842;
+  const marginX = 36;
+  const marginTop = 34;
+  const marginBottom = 42;
+  const contentWidth = pageWidth - marginX * 2;
+  const colors = {
+    ink: [0.07, 0.11, 0.18],
+    muted: [0.40, 0.47, 0.57],
+    accent: [0.10, 0.36, 0.73],
+    border: [0.84, 0.88, 0.94],
+    soft: [0.95, 0.97, 0.99],
+    success: [0.13, 0.46, 0.22],
+  };
+  const columns = [
+    { key: 'item', label: 'Item Description', width: 180, align: 'left' },
+    { key: 'hsn', label: 'HSN', width: 48, align: 'left' },
+    { key: 'qty', label: 'Qty', width: 28, align: 'right' },
+    { key: 'rate', label: 'Rate', width: 58, align: 'right' },
+    { key: 'gstRate', label: 'GST%', width: 38, align: 'right' },
+    { key: 'taxable', label: 'Taxable', width: 58, align: 'right' },
+    { key: 'gst', label: 'GST', width: 48, align: 'right' },
+    { key: 'total', label: 'Total', width: 62, align: 'right' },
+  ];
+
+  const pages = [];
+  const resolveY = top => (pageHeight - top).toFixed(2);
+  const resolveTextY = (top, size) => (pageHeight - top - size).toFixed(2);
+  const colorCommand = color => color.map(value => Number(value).toFixed(3)).join(' ');
+  const estimateRightX = (rightEdge, text, size, fontKey = 'F1') =>
+    Math.max(marginX, rightEdge - estimatePdfTextWidth(text, size, fontKey));
+  const buildText = (text, x, top, options = {}) => {
+    const size = Number(options.size || 10);
+    const font = options.font || 'F1';
+    const color = options.color || colors.ink;
+    return `BT /${font} ${size.toFixed(2)} Tf ${colorCommand(color)} rg 1 0 0 1 ${Number(x).toFixed(2)} ${resolveTextY(top, size)} Tm (${escapePdfText(text)}) Tj ET`;
+  };
+  const buildLine = (x1, top1, x2, top2, options = {}) => {
+    const stroke = options.color || colors.border;
+    const width = Number(options.width || 1);
+    return `${colorCommand(stroke)} RG ${width.toFixed(2)} w ${Number(x1).toFixed(2)} ${resolveY(top1)} m ${Number(x2).toFixed(2)} ${resolveY(top2)} l S`;
+  };
+  const buildRect = (x, top, width, height, options = {}) => {
+    const commands = [];
+    if (options.fillColor) {
+      commands.push(`${colorCommand(options.fillColor)} rg ${Number(x).toFixed(2)} ${(pageHeight - top - height).toFixed(2)} ${Number(width).toFixed(2)} ${Number(height).toFixed(2)} re f`);
+    }
+    if (options.strokeColor) {
+      commands.push(`${colorCommand(options.strokeColor)} RG ${(Number(options.lineWidth || 1)).toFixed(2)} w ${Number(x).toFixed(2)} ${(pageHeight - top - height).toFixed(2)} ${Number(width).toFixed(2)} ${Number(height).toFixed(2)} re S`);
+    }
+    return commands.join('\n');
+  };
+
+  const sellerMetaLines = [];
+  if (safeInvoice.sellerGstin) sellerMetaLines.push(`GSTIN: ${safeInvoice.sellerGstin}`);
+  if (safeInvoice.sellerPan) sellerMetaLines.push(`PAN: ${safeInvoice.sellerPan}`);
+  if (safeInvoice.sellerPhone) sellerMetaLines.push(`Phone: ${safeInvoice.sellerPhone}`);
+  if (safeInvoice.sellerEmail) sellerMetaLines.push(`Email: ${safeInvoice.sellerEmail}`);
+  if (safeInvoice.sellerWebsite) sellerMetaLines.push(`Website: ${safeInvoice.sellerWebsite}`);
+  const sellerLines = [
+    { text: safeInvoice.sellerName || 'Seller', font: 'F2', size: 12, color: colors.ink },
+    ...wrapPdfText(safeInvoice.sellerAddress || '-', 146, 9, 'F1').map(text => ({
+      text,
+      font: 'F1',
+      size: 9,
+      color: colors.ink,
+    })),
+    ...sellerMetaLines.flatMap(text =>
+      wrapPdfText(text, 146, 8.5, 'F1').map(line => ({ text: line, font: 'F1', size: 8.5, color: colors.muted })),
+    ),
+  ];
+  const buyerMetaLines = [];
+  if (safeInvoice.billToPhone) buyerMetaLines.push(safeInvoice.billToPhone);
+  if (safeInvoice.billToEmail) buyerMetaLines.push(safeInvoice.billToEmail);
+  if (safeInvoice.billToGstin) buyerMetaLines.push(`GSTIN: ${safeInvoice.billToGstin}`);
+  const buyerLines = [
+    { text: safeInvoice.billToName || safeInvoice.customerName || 'Customer', font: 'F2', size: 12, color: colors.ink },
+    ...wrapPdfText(safeInvoice.billToAddress || safeInvoice.shipToAddress || '-', 146, 9, 'F1').map(text => ({
+      text,
+      font: 'F1',
+      size: 9,
+      color: colors.ink,
+    })),
+    ...buyerMetaLines.flatMap(text =>
+      wrapPdfText(text, 146, 8.5, 'F1').map(line => ({ text: line, font: 'F1', size: 8.5, color: colors.muted })),
+    ),
+  ];
+  const infoLines = [
+    `Order Ref: ${safeOrder.orderNumber || safeInvoice.orderNumber || '-'}`,
+    `Invoice Date: ${toYmd(safeInvoice.createdAt) || '-'}`,
+    `Status: ${safeInvoice.status || safeOrder.status || 'Open'}`,
+    `Place of Supply: ${safeInvoice.placeOfSupply || safeInvoice.sellerState || '-'}`,
+    'Prices on this invoice are GST inclusive.',
+  ].flatMap(text =>
+    wrapPdfText(text, 146, 8.5, 'F1').map(line => ({ text: line, font: 'F1', size: 8.5, color: colors.ink })),
+  );
+  const infoCardLineCount = Math.max(sellerLines.length, buyerLines.length, infoLines.length);
+  const infoCardHeight = Math.max(88, 28 + infoCardLineCount * 12);
+
+  const amountWordsLines = wrapPdfText(safeInvoice.amountInWords || amountToIndianCurrencyWords(safeInvoice.total), 242, 9, 'F1', 4);
+  const bankLines = [
+    safeInvoice.bankAccountName ? `Account Name: ${safeInvoice.bankAccountName}` : '',
+    safeInvoice.bankAccountNumber ? `Account No: ${safeInvoice.bankAccountNumber}` : '',
+    safeInvoice.bankIfsc ? `IFSC: ${safeInvoice.bankIfsc}` : '',
+    safeInvoice.bankBranch ? `Branch: ${safeInvoice.bankBranch}` : '',
+  ].filter(Boolean);
+  const noteLines = [
+    ...(safeInvoice.declarationNote ? wrapPdfText(`Declaration: ${safeInvoice.declarationNote}`, 242, 8.5, 'F1', 5) : []),
+    ...(safeInvoice.footerNote ? wrapPdfText(`Note: ${safeInvoice.footerNote}`, 242, 8.5, 'F1', 5) : []),
+  ];
+  const summaryRows = [
+    { label: 'Gross Amount', value: formatCurrencyInrForPdf(safeInvoice.subtotal) },
+    { label: 'Discount', value: formatCurrencyInrForPdf(safeInvoice.discount) },
+    { label: 'Delivery', value: formatCurrencyInrForPdf(safeInvoice.deliveryFee) },
+    { label: 'Taxable Amount', value: formatCurrencyInrForPdf(taxBreakdown.taxableTotal) },
+    ...(taxBreakdown.intraState
+      ? [
+          { label: 'CGST @ 9% (included)', value: formatCurrencyInrForPdf(taxBreakdown.cgstTotal) },
+          { label: 'SGST @ 9% (included)', value: formatCurrencyInrForPdf(taxBreakdown.sgstTotal) },
+        ]
+      : [{ label: 'IGST @ 18% (included)', value: formatCurrencyInrForPdf(taxBreakdown.igstTotal) }]),
+    { label: 'Included GST Total', value: formatCurrencyInrForPdf(taxBreakdown.gstTotal) },
+    { label: 'Total Amount', value: formatCurrencyInrForPdf(safeInvoice.total), bold: true },
+  ];
+
+  const drawBlock = (page, x, top, width, title, lines) => {
+    const safeLines = Array.isArray(lines) ? lines : [];
+    page.ops.push(buildRect(x, top, width, infoCardHeight, { strokeColor: colors.border, fillColor: [1, 1, 1] }));
+    page.ops.push(buildText(title, x + 10, top + 10, { font: 'F2', size: 9, color: colors.accent }));
+    let cursorTop = top + 28;
+    safeLines.forEach((line, index) => {
+      const font = line.font || 'F1';
+      const size = line.size || 9;
+      page.ops.push(buildText(line.text, x + 10, cursorTop, { font, size, color: line.color || colors.ink }));
+      cursorTop += index === 0 ? 14 : 11;
+    });
+  };
+
+  const drawTableHeader = page => {
+    page.ops.push(buildRect(marginX, page.cursorTop, contentWidth, 22, { fillColor: colors.soft, strokeColor: colors.border }));
+    let cursorX = marginX + 6;
+    columns.forEach(column => {
+      const labelX =
+        column.align === 'right'
+          ? estimateRightX(cursorX + column.width - 6, column.label, 8, 'F2')
+          : cursorX;
+      page.ops.push(buildText(column.label, labelX, page.cursorTop + 7, { font: 'F2', size: 8, color: colors.muted }));
+      cursorX += column.width;
+    });
+    page.cursorTop += 24;
+  };
+
+  const startPage = isFirstPage => {
+    const page = {
+      ops: [],
+      cursorTop: marginTop,
+    };
+    const rightEdge = pageWidth - marginX;
+    page.ops.push(buildText('Tax Invoice', marginX, 18, { font: 'F2', size: 22, color: colors.ink }));
+    page.ops.push(buildText(safeInvoice.invoiceNumber || safeOrder.orderNumber || 'Invoice', marginX, 44, { font: 'F2', size: 15, color: colors.accent }));
+    page.ops.push(
+      buildText(
+        `Status: ${safeInvoice.status || safeOrder.status || 'Open'}`,
+        estimateRightX(rightEdge, `Status: ${safeInvoice.status || safeOrder.status || 'Open'}`, 10, 'F2'),
+        20,
+        { font: 'F2', size: 10, color: colors.success },
+      ),
+    );
+    page.ops.push(
+      buildText(
+        `Order ID: ${safeOrder.orderNumber || safeInvoice.orderNumber || '-'}`,
+        estimateRightX(rightEdge, `Order ID: ${safeOrder.orderNumber || safeInvoice.orderNumber || '-'}`, 9, 'F1'),
+        38,
+        { font: 'F1', size: 9, color: colors.muted },
+      ),
+    );
+    page.ops.push(
+      buildText(
+        `Date: ${toYmd(safeInvoice.createdAt) || '-'}`,
+        estimateRightX(rightEdge, `Date: ${toYmd(safeInvoice.createdAt) || '-'}`, 9, 'F1'),
+        52,
+        { font: 'F1', size: 9, color: colors.muted },
+      ),
+    );
+    page.ops.push(buildLine(marginX, 66, pageWidth - marginX, 66, { color: colors.border, width: 1 }));
+    page.cursorTop = 78;
+    if (isFirstPage) {
+      drawBlock(page, marginX, page.cursorTop, 160, 'Seller', sellerLines);
+      drawBlock(page, marginX + 170, page.cursorTop, 160, 'Bill To', buyerLines);
+      drawBlock(page, marginX + 340, page.cursorTop, 183, 'Invoice Info', infoLines);
+      page.cursorTop += infoCardHeight + 20;
+    }
+    drawTableHeader(page);
+    pages.push(page);
+    return page;
+  };
+
+  let page = startPage(true);
+  const itemRightEdges = [];
+  let runningX = marginX;
+  columns.forEach(column => {
+    itemRightEdges.push(runningX + column.width - 6);
+    runningX += column.width;
+  });
+
+  (Array.isArray(safeInvoice.lines) ? safeInvoice.lines : []).forEach(line => {
+    const titleLines = wrapPdfText(line.itemName || 'Item', columns[0].width - 12, 9, 'F2', 3);
+    const descriptionLines = wrapPdfText(line.description || '', columns[0].width - 12, 8, 'F1', 3);
+    const rowHeight = Math.max(28, 10 + titleLines.length * 10 + descriptionLines.length * 9);
+    if (page.cursorTop + rowHeight > pageHeight - marginBottom - 180) {
+      page = startPage(false);
+    }
+    page.ops.push(buildRect(marginX, page.cursorTop, contentWidth, rowHeight, { strokeColor: colors.border }));
+    let textTop = page.cursorTop + 8;
+    titleLines.forEach(text => {
+      page.ops.push(buildText(text, marginX + 6, textTop, { font: 'F2', size: 9, color: colors.ink }));
+      textTop += 10;
+    });
+    descriptionLines.forEach(text => {
+      page.ops.push(buildText(text, marginX + 6, textTop, { font: 'F1', size: 8, color: colors.muted }));
+      textTop += 9;
+    });
+    const rowValues = [
+      compactText(line.hsnCode) || '-',
+      String(Math.max(0, parseNumber(line.qty, 0))),
+      formatCurrencyInrForPdf(line.unitPrice || 0),
+      `${Number(parseNumber(line.taxRate, 0)).toFixed(2)}%`,
+      formatCurrencyInrForPdf(line.taxableValue || 0),
+      formatCurrencyInrForPdf(line.gstAmount || 0),
+      formatCurrencyInrForPdf(line.lineTotal || 0),
+    ];
+    rowValues.forEach((value, index) => {
+      const column = columns[index + 1];
+      const leftEdge = marginX + columns.slice(0, index + 1).reduce((sum, entry) => sum + entry.width, 0);
+      const x =
+        column.align === 'right'
+          ? estimateRightX(itemRightEdges[index + 1], value, 8.5, 'F1')
+          : leftEdge + 6;
+      page.ops.push(buildText(value, x, page.cursorTop + 9, { font: 'F1', size: 8.5, color: colors.ink }));
+    });
+    page.cursorTop += rowHeight;
+  });
+
+  const notesHeight =
+    58 +
+    amountWordsLines.length * 11 +
+    (bankLines.length > 0 ? 18 + bankLines.length * 10 : 0) +
+    (noteLines.length > 0 ? 16 + noteLines.length * 10 : 0);
+  const summaryHeight = 48 + summaryRows.length * 16 + 34;
+  const finalBlockHeight = Math.max(summaryHeight, notesHeight) + 24;
+  if (page.cursorTop + finalBlockHeight > pageHeight - marginBottom) {
+    page = startPage(false);
+  }
+
+  const notesTop = page.cursorTop + 12;
+  const notesWidth = 272;
+  const summaryWidth = contentWidth - notesWidth - 16;
+  page.ops.push(buildRect(marginX, notesTop, notesWidth, notesHeight, { strokeColor: colors.border, fillColor: [1, 1, 1] }));
+  page.ops.push(buildRect(marginX + notesWidth + 16, notesTop, summaryWidth, summaryHeight, { strokeColor: colors.border, fillColor: [1, 1, 1] }));
+  page.ops.push(buildText('Amount In Words', marginX + 10, notesTop + 10, { font: 'F2', size: 10, color: colors.accent }));
+  let notesCursorTop = notesTop + 28;
+  amountWordsLines.forEach(text => {
+    page.ops.push(buildText(text, marginX + 10, notesCursorTop, { font: 'F1', size: 9, color: colors.ink }));
+    notesCursorTop += 11;
+  });
+  if (bankLines.length > 0) {
+    notesCursorTop += 8;
+    page.ops.push(buildText('Bank Details', marginX + 10, notesCursorTop, { font: 'F2', size: 9, color: colors.accent }));
+    notesCursorTop += 16;
+    bankLines.forEach(text => {
+      page.ops.push(buildText(text, marginX + 10, notesCursorTop, { font: 'F1', size: 8.5, color: colors.ink }));
+      notesCursorTop += 10;
+    });
+  }
+  if (noteLines.length > 0) {
+    notesCursorTop += 8;
+    noteLines.forEach(text => {
+      page.ops.push(buildText(text, marginX + 10, notesCursorTop, { font: 'F1', size: 8.5, color: colors.muted }));
+      notesCursorTop += 10;
+    });
+  }
+
+  const summaryX = marginX + notesWidth + 16;
+  page.ops.push(buildText('Payment Summary', summaryX + 10, notesTop + 10, { font: 'F2', size: 10, color: colors.accent }));
+  let summaryCursorTop = notesTop + 28;
+  summaryRows.forEach(row => {
+    page.ops.push(
+      buildText(row.label, summaryX + 10, summaryCursorTop, {
+        font: row.bold ? 'F2' : 'F1',
+        size: row.bold ? 10 : 9,
+        color: row.bold ? colors.ink : colors.muted,
+      }),
+    );
+    page.ops.push(
+      buildText(
+        row.value,
+        estimateRightX(summaryX + summaryWidth - 10, row.value, row.bold ? 10 : 9, row.bold ? 'F2' : 'F1'),
+        summaryCursorTop,
+        { font: row.bold ? 'F2' : 'F1', size: row.bold ? 10 : 9, color: colors.ink },
+      ),
+    );
+    summaryCursorTop += 16;
+  });
+  summaryCursorTop += 4;
+  page.ops.push(buildLine(summaryX + 10, summaryCursorTop, summaryX + summaryWidth - 10, summaryCursorTop, { color: colors.border, width: 1 }));
+  summaryCursorTop += 12;
+  page.ops.push(
+    buildText(
+      taxBreakdown.intraState ? 'GST breakup shown as 9% CGST + 9% SGST.' : 'GST breakup shown as 18% IGST.',
+      summaryX + 10,
+      summaryCursorTop,
+      { font: 'F1', size: 8.5, color: colors.muted },
+    ),
+  );
+
+  const footerTop = pageHeight - marginBottom + 8;
+  const footerText = safeInvoice.footerNote || `Authorised signatory for ${safeInvoice.sellerName}`;
+  const signatureText = 'Authorised Signatory';
+  pages.forEach((entry, index) => {
+    entry.ops.push(buildLine(pageWidth - 176, footerTop - 22, pageWidth - 56, footerTop - 22, { color: colors.border, width: 1 }));
+    entry.ops.push(buildText(signatureText, pageWidth - 160, footerTop - 18, { font: 'F1', size: 8.5, color: colors.muted }));
+    entry.ops.push(buildText(footerText, marginX, footerTop - 18, { font: 'F1', size: 8.5, color: colors.muted }));
+    entry.ops.push(
+      buildText(
+        `Page ${index + 1} of ${pages.length}`,
+        estimateRightX(pageWidth / 2 + 34, `Page ${index + 1} of ${pages.length}`, 8.5, 'F1'),
+        footerTop - 2,
+        { font: 'F1', size: 8.5, color: colors.muted },
+      ),
+    );
+  });
+
+  return renderPdfDocument(pages.map(entry => entry.ops.join('\n')));
+}
+
 function hashToken(token) {
   return crypto.createHash('sha256').update(String(token)).digest('hex');
 }
@@ -1696,6 +2323,7 @@ async function ensureDb() {
         'location_saved',
         'location_recent',
         'location_suggestions',
+        'invoice_seller_settings',
       ];
 
       const [tableRows] = await conn.query(
@@ -2032,6 +2660,45 @@ async function ensureDb() {
             ON DELETE CASCADE
             ON UPDATE CASCADE
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+      );
+
+      await conn.query(
+        `CREATE TABLE IF NOT EXISTS invoice_seller_settings (
+          id VARCHAR(32) NOT NULL,
+          seller_name VARCHAR(160) NOT NULL,
+          seller_gstin VARCHAR(20) NULL,
+          seller_address TEXT NOT NULL,
+          seller_state VARCHAR(80) NOT NULL,
+          seller_phone VARCHAR(30) NULL,
+          seller_email VARCHAR(160) NULL,
+          seller_website VARCHAR(200) NULL,
+          seller_pan VARCHAR(20) NULL,
+          bank_account_name VARCHAR(160) NULL,
+          bank_account_number VARCHAR(80) NULL,
+          bank_ifsc VARCHAR(20) NULL,
+          bank_branch VARCHAR(160) NULL,
+          declaration_note TEXT NULL,
+          footer_note TEXT NULL,
+          updated_by VARCHAR(64) NULL,
+          updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+          PRIMARY KEY (id),
+          CONSTRAINT fk_invoice_seller_settings_updated_by
+            FOREIGN KEY (updated_by) REFERENCES users(id)
+            ON DELETE SET NULL
+            ON UPDATE CASCADE
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+      );
+
+      await conn.query(
+        `INSERT IGNORE INTO invoice_seller_settings
+          (id, seller_name, seller_gstin, seller_address, seller_state)
+         VALUES ('default', ?, ?, ?, ?)`,
+        [
+          DEFAULT_INVOICE_SELLER.sellerName,
+          DEFAULT_INVOICE_SELLER.sellerGstin || null,
+          DEFAULT_INVOICE_SELLER.sellerAddress,
+          DEFAULT_INVOICE_SELLER.sellerState,
+        ],
       );
 
       await conn.query(
@@ -2376,7 +3043,7 @@ function mapInvoiceLineFromDbRow(row) {
   });
 }
 
-function mapInvoiceFromDbRow(row, lines = []) {
+function mapInvoiceFromDbRow(row, lines = [], sellerProfile = null) {
   return decorateInvoiceDocument({
     id: row.id,
     orderId: row.order_id,
@@ -2406,7 +3073,7 @@ function mapInvoiceFromDbRow(row, lines = []) {
     shipToAddress: row.ship_to_address,
     placeOfSupply: row.place_of_supply,
     lines,
-  });
+  }, sellerProfile);
 }
 
 function buildSqlPlaceholders(values) {
@@ -2419,7 +3086,8 @@ async function fetchInvoicesByOrderIds(conn, orderIds) {
     return new Map();
   }
 
-  const [invoiceRows] = await conn.query(
+  const [invoiceRows, sellerProfile] = await Promise.all([
+    conn.query(
     `SELECT i.id,
             i.order_id,
             co.order_number,
@@ -2453,8 +3121,10 @@ async function fetchInvoicesByOrderIds(conn, orderIds) {
      WHERE i.order_id IN (${buildSqlPlaceholders(safeOrderIds)})
      ORDER BY i.created_at DESC`,
     safeOrderIds,
-  );
-  const invoiceData = Array.isArray(invoiceRows) ? invoiceRows : [];
+    ),
+    fetchInvoiceSellerProfile(conn),
+  ]);
+  const invoiceData = Array.isArray(invoiceRows?.[0]) ? invoiceRows[0] : Array.isArray(invoiceRows) ? invoiceRows : [];
   const invoiceIds = invoiceData.map(row => row.id).filter(Boolean);
   let invoiceLineData = [];
   if (invoiceIds.length > 0) {
@@ -2500,7 +3170,7 @@ async function fetchInvoicesByOrderIds(conn, orderIds) {
 
   const invoicesByOrder = new Map();
   for (const row of invoiceData) {
-    invoicesByOrder.set(row.order_id, mapInvoiceFromDbRow(row, invoiceLinesByInvoice.get(row.id) || []));
+    invoicesByOrder.set(row.order_id, mapInvoiceFromDbRow(row, invoiceLinesByInvoice.get(row.id) || [], sellerProfile));
   }
   return invoicesByOrder;
 }
@@ -3448,6 +4118,21 @@ function sendHtml(res, status, html, extraHeaders = null) {
     ...(extraHeaders || {}),
   });
   res.end(String(html || ''));
+}
+
+function sendPdf(res, status, pdfBuffer, extraHeaders = null) {
+  const payload = Buffer.isBuffer(pdfBuffer) ? pdfBuffer : Buffer.from(pdfBuffer || '');
+  res.writeHead(status, {
+    'Content-Type': 'application/pdf',
+    'Content-Length': payload.length,
+    'Cache-Control': 'no-store, max-age=0',
+    'X-Content-Type-Options': 'nosniff',
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Methods': 'GET,POST,PATCH,DELETE,OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type,Authorization',
+    ...(extraHeaders || {}),
+  });
+  res.end(payload);
 }
 
 function sendError(res, status, message) {
@@ -5131,6 +5816,7 @@ const server = http.createServer(async (req, res) => {
 
         const invoiceId = `invdoc_${crypto.randomUUID().slice(0, 8)}`;
         const invoiceNumber = await reserveDocumentNumber(conn, 'INV', 'INV');
+        const sellerProfile = await fetchInvoiceSellerProfile(conn);
         const invoice = buildInvoiceDocument({
           id: invoiceId,
           orderId,
@@ -5153,6 +5839,7 @@ const server = http.createServer(async (req, res) => {
           placeOfSupply: formatPlaceOfSupply(deliveryLocation, customer.shippingAddress || shippingAddress),
           placeOfSupplyState: deliveryLocation?.state || '',
           lines: invoiceLineDrafts,
+          sellerProfile,
         });
         await conn.query(
           `INSERT INTO invoices
@@ -5286,10 +5973,10 @@ const server = http.createServer(async (req, res) => {
           sendError(res, 404, 'Invoice not found for this order');
           return;
         }
-        const html = renderStorefrontInvoiceHtml(order, order.invoice);
+        const pdfBuffer = renderStorefrontInvoicePdf(order, order.invoice);
         const safeName = sanitizeFilePart(order.invoice.invoiceNumber || order.orderNumber || 'invoice');
-        sendHtml(res, 200, html, {
-          'Content-Disposition': `attachment; filename="${safeName}.html"`,
+        sendPdf(res, 200, pdfBuffer, {
+          'Content-Disposition': `attachment; filename="${safeName}.pdf"`,
         });
       } finally {
         conn.release();
@@ -5530,6 +6217,52 @@ const server = http.createServer(async (req, res) => {
 
         const profileBundle = await fetchUserProfileAndPrefs(conn, authUser.userId);
         sendJson(res, 200, { profile: profileBundle.profile, preferences: profileBundle.preferences });
+      } finally {
+        conn.release();
+      }
+      return;
+    }
+
+    if (pathname === '/api/public/storefront/admin/seller-settings' && req.method === 'GET') {
+      const authUser = await getAuth(req);
+      if (!authUser?.userId) {
+        sendError(res, 401, 'Login required for seller settings');
+        return;
+      }
+      if (authUser.role !== 'admin') {
+        sendError(res, 403, 'Only admin can manage seller settings');
+        return;
+      }
+      const conn = await mysqlPool.getConnection();
+      try {
+        const settings = await fetchInvoiceSellerProfile(conn);
+        sendJson(res, 200, { settings });
+      } finally {
+        conn.release();
+      }
+      return;
+    }
+
+    if (pathname === '/api/public/storefront/admin/seller-settings' && req.method === 'PATCH') {
+      const authUser = await getAuth(req);
+      if (!authUser?.userId) {
+        sendError(res, 401, 'Login required for seller settings');
+        return;
+      }
+      if (authUser.role !== 'admin') {
+        sendError(res, 403, 'Only admin can manage seller settings');
+        return;
+      }
+      const body = await parseJsonBody(req);
+      const validationError = validateInvoiceSellerProfileInput(body);
+      if (validationError) {
+        sendError(res, 400, validationError);
+        return;
+      }
+      const conn = await mysqlPool.getConnection();
+      try {
+        const settings = await upsertInvoiceSellerProfile(conn, body, authUser.userId);
+        sendJson(res, 200, { settings });
       } finally {
         conn.release();
       }
@@ -6301,6 +7034,7 @@ const server = http.createServer(async (req, res) => {
         reference: invoiceNumber,
       });
 
+      const sellerProfile = await fetchInvoiceSellerProfile();
       const invoice = buildInvoiceDocument({
         id: `invdoc_${crypto.randomUUID().slice(0, 8)}`,
         invoiceNumber,
@@ -6326,6 +7060,7 @@ const server = http.createServer(async (req, res) => {
             unitPrice,
           },
         ],
+        sellerProfile,
       });
 
       db.counters.inv += 1;

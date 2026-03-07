@@ -98,6 +98,28 @@ const styles = StyleSheet.create({
     fontSize: scaleFont(12),
     fontWeight: '700',
   },
+  poweredByFooter: {
+    marginTop: 16,
+    paddingTop: 12,
+    paddingBottom: 6,
+    paddingHorizontal: 12,
+    borderTopWidth: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  poweredByFooterFloating: {
+    marginTop: 0,
+    marginHorizontal: 16,
+    paddingTop: 10,
+    paddingBottom: 2,
+  },
+  poweredByFooterText: {
+    fontSize: scaleFont(10),
+    lineHeight: scaleFont(14),
+    fontWeight: '700',
+    letterSpacing: 0.35,
+    textAlign: 'center',
+  },
   headerLoginBtn: {
     borderRadius: 999,
     paddingHorizontal: 11,
@@ -1541,6 +1563,13 @@ const styles = StyleSheet.create({
     flexWrap: 'wrap',
     gap: 8,
   },
+  featuredProductsGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    justifyContent: 'space-between',
+    rowGap: 8,
+    columnGap: 8,
+  },
   productTile: {
     width: PRODUCT_TILE_WIDTH,
     borderRadius: 10,
@@ -1550,6 +1579,9 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: '#D6DCE3',
     position: 'relative',
+  },
+  featuredProductTile: {
+    width: '48.5%',
   },
   productTileName: {
     minHeight: scaleVertical(34, 0.9, 1.12),

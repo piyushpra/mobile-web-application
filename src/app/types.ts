@@ -24,7 +24,15 @@ export type AuthMode = 'none' | 'login' | 'register' | 'forgot';
 export type PublicView = 'landing' | 'categories' | 'categoryProducts' | 'list' | 'auth' | 'cart' | 'feedback';
 export type LandingCategory = 'inverters' | 'batteries' | 'accessories';
 export type ViewMoreContext = 'category' | 'featured' | 'all';
-export type ProfilePanel = 'orders' | 'wishlist' | 'payments' | 'notifications' | 'installation' | 'warranty' | 'language';
+export type ProfilePanel =
+  | 'orders'
+  | 'wishlist'
+  | 'payments'
+  | 'notifications'
+  | 'installation'
+  | 'warranty'
+  | 'language'
+  | 'seller';
 
 export type Theme = {
   bg: string;
@@ -198,6 +206,16 @@ export type InvoiceDetail = {
   sellerGstin?: string;
   sellerAddress?: string;
   sellerState?: string;
+  sellerPhone?: string;
+  sellerEmail?: string;
+  sellerWebsite?: string;
+  sellerPan?: string;
+  bankAccountName?: string;
+  bankAccountNumber?: string;
+  bankIfsc?: string;
+  bankBranch?: string;
+  declarationNote?: string;
+  footerNote?: string;
   pricesIncludeGst: boolean;
   amountInWords: string;
   lines: InvoiceLine[];
@@ -237,6 +255,16 @@ export type Doc = {
   sellerGstin?: string;
   sellerAddress?: string;
   sellerState?: string;
+  sellerPhone?: string;
+  sellerEmail?: string;
+  sellerWebsite?: string;
+  sellerPan?: string;
+  bankAccountName?: string;
+  bankAccountNumber?: string;
+  bankIfsc?: string;
+  bankBranch?: string;
+  declarationNote?: string;
+  footerNote?: string;
   amountInWords?: string;
   orderId?: string;
   orderNumber?: string;
@@ -323,6 +351,23 @@ export type ProfileWarrantyClaim = {
   createdAt: string;
   status: 'Submitted' | 'Approved' | 'Rejected';
   note: string;
+};
+
+export type SellerBillingSettings = {
+  sellerName: string;
+  sellerGstin: string;
+  sellerAddress: string;
+  sellerState: string;
+  sellerPhone?: string;
+  sellerEmail?: string;
+  sellerWebsite?: string;
+  sellerPan?: string;
+  bankAccountName?: string;
+  bankAccountNumber?: string;
+  bankIfsc?: string;
+  bankBranch?: string;
+  declarationNote?: string;
+  footerNote?: string;
 };
 
 export type FeedbackOrderItem = {

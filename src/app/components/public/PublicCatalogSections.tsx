@@ -121,7 +121,7 @@ function PublicCatalogSections({
     [searchedLandingProducts],
   );
   const featuredPreviewProducts = React.useMemo(
-    () => searchedPublicProducts.slice(0, 2),
+    () => searchedPublicProducts.slice(0, 4),
     [searchedPublicProducts],
   );
 
@@ -391,12 +391,12 @@ function PublicCatalogSections({
               </Pressable>
             </View>
             {isPublicLoading ? <ActivityIndicator color={theme.primary} /> : null}
-            <View style={styles.productsGrid}>
+            <View style={styles.featuredProductsGrid}>
               {featuredPreviewProducts.map(product => {
                 const offerLabel = getOfferLabel(product);
                 const productCartQty = cartQtyByProductId[product.id] || 0;
                 return (
-                  <View key={product.id} style={[styles.productTile, { backgroundColor: theme.panelSoft }]}> 
+                  <View key={product.id} style={[styles.productTile, styles.featuredProductTile, { backgroundColor: theme.panelSoft }]}> 
                     {offerLabel ? (
                       <View style={[styles.dealBadge, { backgroundColor: '#F59E0B' }]}>
                         <Text style={styles.dealBadgeText}>{offerLabel}</Text>

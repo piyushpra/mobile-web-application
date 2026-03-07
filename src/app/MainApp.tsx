@@ -75,6 +75,7 @@ import type {
   PublicProductDetail,
   PublicStockItem,
   PublicView,
+  SellerBillingSettings,
   User,
   ViewMoreContext,
 } from './types';
@@ -92,6 +93,23 @@ const DEFAULT_PAYMENT_METHODS: ProfilePaymentMethod[] = [
   { id: 'pm_cod', label: 'Cash on Delivery', detail: 'Pay when product is delivered', isDefault: true },
   { id: 'pm_upi', label: 'UPI', detail: 'piyush@upi', isDefault: false },
 ];
+
+const DEFAULT_SELLER_BILLING_SETTINGS: SellerBillingSettings = {
+  sellerName: 'FuElectric',
+  sellerGstin: '',
+  sellerAddress: 'New Delhi, Delhi, India',
+  sellerState: 'Delhi',
+  sellerPhone: '',
+  sellerEmail: '',
+  sellerWebsite: '',
+  sellerPan: '',
+  bankAccountName: '',
+  bankAccountNumber: '',
+  bankIfsc: '',
+  bankBranch: '',
+  declarationNote: '',
+  footerNote: '',
+};
 
 type ItemImageDraft = {
   id: string;
@@ -391,6 +409,16 @@ function normalizeInvoiceDetail(
     sellerGstin: toOptionalText(raw.sellerGstin),
     sellerAddress: toOptionalText(raw.sellerAddress),
     sellerState: toOptionalText(raw.sellerState),
+    sellerPhone: toOptionalText(raw.sellerPhone),
+    sellerEmail: toOptionalText(raw.sellerEmail),
+    sellerWebsite: toOptionalText(raw.sellerWebsite),
+    sellerPan: toOptionalText(raw.sellerPan),
+    bankAccountName: toOptionalText(raw.bankAccountName),
+    bankAccountNumber: toOptionalText(raw.bankAccountNumber),
+    bankIfsc: toOptionalText(raw.bankIfsc),
+    bankBranch: toOptionalText(raw.bankBranch),
+    declarationNote: toOptionalText(raw.declarationNote),
+    footerNote: toOptionalText(raw.footerNote),
     pricesIncludeGst: raw.pricesIncludeGst !== false,
     amountInWords: String(raw.amountInWords || ''),
     lines: Array.isArray(raw.lines) ? raw.lines.filter(Boolean) : [],
@@ -451,6 +479,41 @@ function normalizeProfileOrders(value: ProfileOrder[] | Partial<ProfileOrder>[] 
     return [];
   }
   return value.map((order, index) => normalizeProfileOrder(order, index));
+}
+
+function normalizeSellerBillingSettings(value: Partial<SellerBillingSettings> | null | undefined): SellerBillingSettings {
+  return {
+    sellerName: String(value?.sellerName || DEFAULT_SELLER_BILLING_SETTINGS.sellerName),
+    sellerGstin: String(value?.sellerGstin || '').trim().toUpperCase(),
+    sellerAddress: String(value?.sellerAddress || DEFAULT_SELLER_BILLING_SETTINGS.sellerAddress),
+    sellerState: String(value?.sellerState || DEFAULT_SELLER_BILLING_SETTINGS.sellerState),
+    sellerPhone: String(value?.sellerPhone || '').trim(),
+    sellerEmail: String(value?.sellerEmail || '').trim(),
+    sellerWebsite: String(value?.sellerWebsite || '').trim(),
+    sellerPan: String(value?.sellerPan || '').trim().toUpperCase(),
+    bankAccountName: String(value?.bankAccountName || '').trim(),
+    bankAccountNumber: String(value?.bankAccountNumber || '').trim(),
+    bankIfsc: String(value?.bankIfsc || '').trim().toUpperCase(),
+    bankBranch: String(value?.bankBranch || '').trim(),
+    declarationNote: String(value?.declarationNote || '').trim(),
+    footerNote: String(value?.footerNote || '').trim(),
+  };
+}
+
+function PoweredByFooter({
+  textColor,
+  borderColor,
+  style,
+}: {
+  textColor: string;
+  borderColor: string;
+  style?: any;
+}) {
+  return (
+    <View style={[styles.poweredByFooter, { borderTopColor: borderColor }, style]}>
+      <Text style={[styles.poweredByFooterText, { color: textColor }]}>Powered by Dayal Electronics</Text>
+    </View>
+  );
 }
 
 function MainApp() {
@@ -556,6 +619,10 @@ function MainApp() {
     promotions: true,
     warrantyAlerts: true,
   });
+  const [sellerBillingSettings, setSellerBillingSettings] = useState<SellerBillingSettings>(DEFAULT_SELLER_BILLING_SETTINGS);
+  const [sellerBillingDraft, setSellerBillingDraft] = useState<SellerBillingSettings>(DEFAULT_SELLER_BILLING_SETTINGS);
+  const [isSellerBillingLoading, setIsSellerBillingLoading] = useState(false);
+  const [isSellerBillingSaving, setIsSellerBillingSaving] = useState(false);
   const [heroImageFailed, setHeroImageFailed] = useState(false);
   const [suppliers, setSuppliers] = useState<Party[]>([]);
   const [customers, setCustomers] = useState<Party[]>([]);
@@ -1158,6 +1225,13 @@ function MainApp() {
   };
 
   const openProfilePanel = (panel: ProfilePanel) => {
+    if (panel === 'seller') {
+      if (!token || user?.role !== 'admin') {
+        Alert.alert('Admin Only', 'Seller billing settings are available only for admin login.');
+        return;
+      }
+      void loadSellerBillingSettings();
+    }
     setActiveProfilePanel(panel);
   };
 
@@ -1169,6 +1243,57 @@ function MainApp() {
   const openSavedAddressesFromProfile = () => {
     setIsProfileModalVisible(false);
     setIsLocationModalVisible(true);
+  };
+
+  const loadSellerBillingSettings = async () => {
+    if (!token || user?.role !== 'admin') {
+      return;
+    }
+    try {
+      setIsSellerBillingLoading(true);
+      const json = await storefrontApiRequest<{ settings?: SellerBillingSettings }>(
+        '/api/public/storefront/admin/seller-settings',
+      );
+      const nextSettings = normalizeSellerBillingSettings(json.settings);
+      setSellerBillingSettings(nextSettings);
+      setSellerBillingDraft(nextSettings);
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Failed to load seller billing settings', 'error');
+    } finally {
+      setIsSellerBillingLoading(false);
+    }
+  };
+
+  const saveSellerBillingSettings = async () => {
+    if (!token || user?.role !== 'admin') {
+      Alert.alert('Admin Only', 'Seller billing settings can only be updated by admin.');
+      return;
+    }
+
+    const nextSettings = normalizeSellerBillingSettings(sellerBillingDraft);
+    if (!nextSettings.sellerName.trim() || !nextSettings.sellerAddress.trim() || !nextSettings.sellerState.trim()) {
+      Alert.alert('Validation', 'Seller name, address, and state are required.');
+      return;
+    }
+
+    try {
+      setIsSellerBillingSaving(true);
+      const json = await storefrontApiRequest<{ settings?: SellerBillingSettings }>(
+        '/api/public/storefront/admin/seller-settings',
+        {
+          method: 'PATCH',
+          body: JSON.stringify(nextSettings),
+        },
+      );
+      const savedSettings = normalizeSellerBillingSettings(json.settings || nextSettings);
+      setSellerBillingSettings(savedSettings);
+      setSellerBillingDraft(savedSettings);
+      showToast('Seller billing details updated');
+    } catch (err) {
+      Alert.alert('Save Failed', err instanceof Error ? err.message : 'Unable to update seller billing details');
+    } finally {
+      setIsSellerBillingSaving(false);
+    }
   };
 
   const loadFeedbackOrderItems = async () => {
@@ -1777,6 +1902,8 @@ function MainApp() {
         setPaymentMethods(DEFAULT_PAYMENT_METHODS);
         setInstallationRequests([]);
         setWarrantyClaims([]);
+        setSellerBillingSettings(DEFAULT_SELLER_BILLING_SETTINGS);
+        setSellerBillingDraft(DEFAULT_SELLER_BILLING_SETTINGS);
         setProfileName('Piyush Sharma');
         setProfileEmail('piyush@email.com');
         setProfilePhone('+91 98XXXXXXXX');
@@ -3213,6 +3340,7 @@ function MainApp() {
     if (activeProfilePanel === 'installation') return 'Installation Requests';
     if (activeProfilePanel === 'warranty') return 'Warranty Claims';
     if (activeProfilePanel === 'language') return 'Language';
+    if (activeProfilePanel === 'seller') return 'Seller Billing';
     return 'Profile';
   }, [activeProfilePanel]);
   const cartSummary = useMemo(() => {
@@ -3517,6 +3645,7 @@ function MainApp() {
               error={error}
             />
           ) : null}
+          <PoweredByFooter textColor={theme.subtext} borderColor={theme.steel} />
         </ScrollView>
         {publicView !== 'feedback' && publicView !== 'categories' && publicView !== 'categoryProducts' ? (
           <PublicFooter
@@ -3650,6 +3779,21 @@ function MainApp() {
                 </Pressable>
               </View>
 
+              {token && user?.role === 'admin' ? (
+                <>
+                  <Text style={[styles.profileSectionTitle, { color: profileDarkMode ? '#E5E7EB' : '#111827' }]}>Admin Tools</Text>
+                  <View style={[styles.profileSectionCard, { backgroundColor: profileDarkMode ? '#111827' : '#FFFFFF' }]}>
+                    <Pressable style={styles.profileMenuRow} onPress={() => openProfilePanel('seller')}>
+                      <Text style={styles.profileMenuIcon}>🧾</Text>
+                      <Text style={[styles.profileMenuLabel, { color: profileDarkMode ? '#F8FAFC' : '#111827' }]}>
+                        Seller Billing Details
+                      </Text>
+                      <Text style={[styles.profileMenuArrow, { color: profileDarkMode ? '#94A3B8' : '#6B7280' }]}>›</Text>
+                    </Pressable>
+                  </View>
+                </>
+              ) : null}
+
               <Text style={[styles.profileSectionTitle, { color: profileDarkMode ? '#E5E7EB' : '#111827' }]}>Service & Support</Text>
               <View style={[styles.profileSectionCard, { backgroundColor: profileDarkMode ? '#111827' : '#FFFFFF' }]}>
                 <Pressable style={styles.profileMenuRow} onPress={() => openProfilePanel('installation')}>
@@ -3701,6 +3845,7 @@ function MainApp() {
                   <Text style={[styles.profileMenuArrow, { color: profileDarkMode ? '#94A3B8' : '#6B7280' }]}>›</Text>
                 </Pressable>
               </View>
+              <PoweredByFooter textColor={profileDarkMode ? '#94A3B8' : '#6B7280'} borderColor={orderDetailPalette.border} />
             </ScrollView>
           </SafeAreaView>
         </Modal>
@@ -3911,6 +4056,309 @@ function MainApp() {
                 </View>
               ) : null}
 
+              {activeProfilePanel === 'seller' ? (
+                <View
+                  style={[
+                    styles.profilePanelCard,
+                    {
+                      backgroundColor: orderDetailPalette.surface,
+                      borderColor: orderDetailPalette.border,
+                      gap: 12,
+                    },
+                  ]}
+                >
+                  <View
+                    style={[
+                      {
+                        borderRadius: 14,
+                        borderWidth: 1,
+                        borderColor: orderDetailPalette.border,
+                        backgroundColor: orderDetailPalette.surfaceSoft,
+                        padding: 12,
+                        gap: 4,
+                      },
+                    ]}
+                  >
+                    <Text style={[styles.profilePanelMain, { color: orderDetailPalette.title }]}>
+                      Billing PDF Seller Details
+                    </Text>
+                    <Text style={[styles.profilePanelSub, { color: orderDetailPalette.subtext }]}>
+                      These details will be printed on the downloadable invoice PDF for storefront orders.
+                    </Text>
+                    <Text style={[styles.profilePanelSub, { color: orderDetailPalette.accentText }]}>
+                      Current seller on PDF: {sellerBillingSettings.sellerName}
+                    </Text>
+                  </View>
+
+                  {isSellerBillingLoading ? (
+                    <View style={{ paddingVertical: 22, alignItems: 'center', justifyContent: 'center', gap: 10 }}>
+                      <ActivityIndicator color={orderDetailPalette.buttonBg} />
+                      <Text style={[styles.profilePanelSub, { color: orderDetailPalette.subtext }]}>
+                        Loading seller billing details...
+                      </Text>
+                    </View>
+                  ) : (
+                    <>
+                      <View style={{ gap: 8 }}>
+                        <Text style={[styles.profilePanelMain, { color: orderDetailPalette.title }]}>Required On Billing PDF</Text>
+                        <Text style={[styles.profilePanelSub, { color: orderDetailPalette.subtext }]}>
+                          Seller legal name, GSTIN, full address, and seller state are the primary tax-invoice fields.
+                        </Text>
+                        <Text style={[styles.profilePanelSub, { color: orderDetailPalette.subtext }]}>Seller Legal Name</Text>
+                        <TextInput
+                          value={sellerBillingDraft.sellerName}
+                          onChangeText={text => setSellerBillingDraft(prev => ({ ...prev, sellerName: text }))}
+                          placeholder="FuElectric Pvt Ltd"
+                          placeholderTextColor={orderDetailPalette.subtext}
+                          style={[
+                            styles.profileEditInput,
+                            {
+                              color: orderDetailPalette.title,
+                              backgroundColor: orderDetailPalette.surfaceSoft,
+                              borderColor: orderDetailPalette.border,
+                            },
+                          ]}
+                        />
+                        <Text style={[styles.profilePanelSub, { color: orderDetailPalette.subtext }]}>Seller GSTIN</Text>
+                        <TextInput
+                          value={sellerBillingDraft.sellerGstin}
+                          onChangeText={text => setSellerBillingDraft(prev => ({ ...prev, sellerGstin: text.toUpperCase() }))}
+                          placeholder="22AAAAA0000A1Z5"
+                          placeholderTextColor={orderDetailPalette.subtext}
+                          autoCapitalize="characters"
+                          style={[
+                            styles.profileEditInput,
+                            {
+                              color: orderDetailPalette.title,
+                              backgroundColor: orderDetailPalette.surfaceSoft,
+                              borderColor: orderDetailPalette.border,
+                            },
+                          ]}
+                        />
+                        <Text style={[styles.profilePanelSub, { color: orderDetailPalette.subtext }]}>Seller Address</Text>
+                        <TextInput
+                          value={sellerBillingDraft.sellerAddress}
+                          onChangeText={text => setSellerBillingDraft(prev => ({ ...prev, sellerAddress: text }))}
+                          placeholder="Street, area, city, state, pincode"
+                          placeholderTextColor={orderDetailPalette.subtext}
+                          multiline
+                          textAlignVertical="top"
+                          style={[
+                            styles.profileEditInput,
+                            {
+                              minHeight: 88,
+                              color: orderDetailPalette.title,
+                              backgroundColor: orderDetailPalette.surfaceSoft,
+                              borderColor: orderDetailPalette.border,
+                            },
+                          ]}
+                        />
+                        <Text style={[styles.profilePanelSub, { color: orderDetailPalette.subtext }]}>Seller State</Text>
+                        <TextInput
+                          value={sellerBillingDraft.sellerState}
+                          onChangeText={text => setSellerBillingDraft(prev => ({ ...prev, sellerState: text }))}
+                          placeholder="Haryana"
+                          placeholderTextColor={orderDetailPalette.subtext}
+                          style={[
+                            styles.profileEditInput,
+                            {
+                              color: orderDetailPalette.title,
+                              backgroundColor: orderDetailPalette.surfaceSoft,
+                              borderColor: orderDetailPalette.border,
+                            },
+                          ]}
+                        />
+                      </View>
+
+                      <View style={{ gap: 8 }}>
+                        <Text style={[styles.profilePanelMain, { color: orderDetailPalette.title }]}>Optional On Billing PDF</Text>
+                        <Text style={[styles.profilePanelSub, { color: orderDetailPalette.subtext }]}>
+                          Add contact, bank, and declaration details only if you want them printed on the invoice.
+                        </Text>
+                        <Text style={[styles.profilePanelSub, { color: orderDetailPalette.subtext }]}>Phone</Text>
+                        <TextInput
+                          value={sellerBillingDraft.sellerPhone || ''}
+                          onChangeText={text => setSellerBillingDraft(prev => ({ ...prev, sellerPhone: text }))}
+                          placeholder="+91 98765 43210"
+                          placeholderTextColor={orderDetailPalette.subtext}
+                          style={[
+                            styles.profileEditInput,
+                            {
+                              color: orderDetailPalette.title,
+                              backgroundColor: orderDetailPalette.surfaceSoft,
+                              borderColor: orderDetailPalette.border,
+                            },
+                          ]}
+                        />
+                        <Text style={[styles.profilePanelSub, { color: orderDetailPalette.subtext }]}>Email</Text>
+                        <TextInput
+                          value={sellerBillingDraft.sellerEmail || ''}
+                          onChangeText={text => setSellerBillingDraft(prev => ({ ...prev, sellerEmail: text }))}
+                          placeholder="billing@example.com"
+                          placeholderTextColor={orderDetailPalette.subtext}
+                          autoCapitalize="none"
+                          keyboardType="email-address"
+                          style={[
+                            styles.profileEditInput,
+                            {
+                              color: orderDetailPalette.title,
+                              backgroundColor: orderDetailPalette.surfaceSoft,
+                              borderColor: orderDetailPalette.border,
+                            },
+                          ]}
+                        />
+                        <Text style={[styles.profilePanelSub, { color: orderDetailPalette.subtext }]}>Website</Text>
+                        <TextInput
+                          value={sellerBillingDraft.sellerWebsite || ''}
+                          onChangeText={text => setSellerBillingDraft(prev => ({ ...prev, sellerWebsite: text }))}
+                          placeholder="https://example.com"
+                          placeholderTextColor={orderDetailPalette.subtext}
+                          autoCapitalize="none"
+                          style={[
+                            styles.profileEditInput,
+                            {
+                              color: orderDetailPalette.title,
+                              backgroundColor: orderDetailPalette.surfaceSoft,
+                              borderColor: orderDetailPalette.border,
+                            },
+                          ]}
+                        />
+                        <Text style={[styles.profilePanelSub, { color: orderDetailPalette.subtext }]}>PAN</Text>
+                        <TextInput
+                          value={sellerBillingDraft.sellerPan || ''}
+                          onChangeText={text => setSellerBillingDraft(prev => ({ ...prev, sellerPan: text.toUpperCase() }))}
+                          placeholder="ABCDE1234F"
+                          placeholderTextColor={orderDetailPalette.subtext}
+                          autoCapitalize="characters"
+                          style={[
+                            styles.profileEditInput,
+                            {
+                              color: orderDetailPalette.title,
+                              backgroundColor: orderDetailPalette.surfaceSoft,
+                              borderColor: orderDetailPalette.border,
+                            },
+                          ]}
+                        />
+                        <Text style={[styles.profilePanelSub, { color: orderDetailPalette.subtext }]}>Bank Account Name</Text>
+                        <TextInput
+                          value={sellerBillingDraft.bankAccountName || ''}
+                          onChangeText={text => setSellerBillingDraft(prev => ({ ...prev, bankAccountName: text }))}
+                          placeholder="FuElectric Pvt Ltd"
+                          placeholderTextColor={orderDetailPalette.subtext}
+                          style={[
+                            styles.profileEditInput,
+                            {
+                              color: orderDetailPalette.title,
+                              backgroundColor: orderDetailPalette.surfaceSoft,
+                              borderColor: orderDetailPalette.border,
+                            },
+                          ]}
+                        />
+                        <Text style={[styles.profilePanelSub, { color: orderDetailPalette.subtext }]}>Bank Account Number</Text>
+                        <TextInput
+                          value={sellerBillingDraft.bankAccountNumber || ''}
+                          onChangeText={text => setSellerBillingDraft(prev => ({ ...prev, bankAccountNumber: text }))}
+                          placeholder="123456789012"
+                          placeholderTextColor={orderDetailPalette.subtext}
+                          keyboardType="number-pad"
+                          style={[
+                            styles.profileEditInput,
+                            {
+                              color: orderDetailPalette.title,
+                              backgroundColor: orderDetailPalette.surfaceSoft,
+                              borderColor: orderDetailPalette.border,
+                            },
+                          ]}
+                        />
+                        <Text style={[styles.profilePanelSub, { color: orderDetailPalette.subtext }]}>Bank IFSC</Text>
+                        <TextInput
+                          value={sellerBillingDraft.bankIfsc || ''}
+                          onChangeText={text => setSellerBillingDraft(prev => ({ ...prev, bankIfsc: text.toUpperCase() }))}
+                          placeholder="HDFC0001234"
+                          placeholderTextColor={orderDetailPalette.subtext}
+                          autoCapitalize="characters"
+                          style={[
+                            styles.profileEditInput,
+                            {
+                              color: orderDetailPalette.title,
+                              backgroundColor: orderDetailPalette.surfaceSoft,
+                              borderColor: orderDetailPalette.border,
+                            },
+                          ]}
+                        />
+                        <Text style={[styles.profilePanelSub, { color: orderDetailPalette.subtext }]}>Bank Branch</Text>
+                        <TextInput
+                          value={sellerBillingDraft.bankBranch || ''}
+                          onChangeText={text => setSellerBillingDraft(prev => ({ ...prev, bankBranch: text }))}
+                          placeholder="Sector 12 Branch"
+                          placeholderTextColor={orderDetailPalette.subtext}
+                          style={[
+                            styles.profileEditInput,
+                            {
+                              color: orderDetailPalette.title,
+                              backgroundColor: orderDetailPalette.surfaceSoft,
+                              borderColor: orderDetailPalette.border,
+                            },
+                          ]}
+                        />
+                        <Text style={[styles.profilePanelSub, { color: orderDetailPalette.subtext }]}>Declaration Note</Text>
+                        <TextInput
+                          value={sellerBillingDraft.declarationNote || ''}
+                          onChangeText={text => setSellerBillingDraft(prev => ({ ...prev, declarationNote: text }))}
+                          placeholder="We declare that this invoice shows the actual price of the goods described."
+                          placeholderTextColor={orderDetailPalette.subtext}
+                          multiline
+                          textAlignVertical="top"
+                          style={[
+                            styles.profileEditInput,
+                            {
+                              minHeight: 74,
+                              color: orderDetailPalette.title,
+                              backgroundColor: orderDetailPalette.surfaceSoft,
+                              borderColor: orderDetailPalette.border,
+                            },
+                          ]}
+                        />
+                        <Text style={[styles.profilePanelSub, { color: orderDetailPalette.subtext }]}>Footer Note</Text>
+                        <TextInput
+                          value={sellerBillingDraft.footerNote || ''}
+                          onChangeText={text => setSellerBillingDraft(prev => ({ ...prev, footerNote: text }))}
+                          placeholder="Thank you for your business."
+                          placeholderTextColor={orderDetailPalette.subtext}
+                          multiline
+                          textAlignVertical="top"
+                          style={[
+                            styles.profileEditInput,
+                            {
+                              minHeight: 60,
+                              color: orderDetailPalette.title,
+                              backgroundColor: orderDetailPalette.surfaceSoft,
+                              borderColor: orderDetailPalette.border,
+                            },
+                          ]}
+                        />
+                      </View>
+
+                      <Pressable
+                        style={[
+                          styles.profilePanelPrimaryBtn,
+                          {
+                            backgroundColor: orderDetailPalette.buttonBg,
+                            opacity: isSellerBillingSaving ? 0.7 : 1,
+                          },
+                        ]}
+                        onPress={saveSellerBillingSettings}
+                        disabled={isSellerBillingSaving}
+                      >
+                        <Text style={styles.profilePanelPrimaryText}>
+                          {isSellerBillingSaving ? 'Saving...' : 'Save Billing Details'}
+                        </Text>
+                      </Pressable>
+                    </>
+                  )}
+                </View>
+              ) : null}
+
               {activeProfilePanel === 'notifications' ? (
                 <View
                   style={[
@@ -4075,6 +4523,7 @@ function MainApp() {
                   ))}
                 </View>
               ) : null}
+              <PoweredByFooter textColor={orderDetailPalette.subtext} borderColor={orderDetailPalette.border} />
             </ScrollView>
           </SafeAreaView>
         </Modal>
@@ -4372,6 +4821,7 @@ function MainApp() {
                     <Text style={[styles.orderDetailSecondaryBtnText, { color: orderDetailPalette.buttonBg }]}>Need Help?</Text>
                   </Pressable>
                 </View>
+                <PoweredByFooter textColor={orderDetailPalette.subtext} borderColor={orderDetailPalette.border} />
               </ScrollView>
             ) : null}
           </SafeAreaView>
@@ -4766,7 +5216,7 @@ function MainApp() {
                   </>
                 )}
               </Animated.View>
-
+              <PoweredByFooter textColor={theme.subtext} borderColor={theme.steel} />
             </ScrollView>
           </SafeAreaView>
         </Modal>
@@ -4878,6 +5328,8 @@ function MainApp() {
                 <Text style={[styles.small, { color: theme.subtext }]}>{suggestedEmptyMessage}</Text>
               ) : null}
             </ScrollView>
+
+            <PoweredByFooter textColor={theme.subtext} borderColor={theme.steel} style={styles.poweredByFooterFloating} />
 
             <View style={[styles.locationBottomActions, { backgroundColor: theme.bg }]}>
               <Pressable
@@ -5089,6 +5541,7 @@ function MainApp() {
                   <Text style={[styles.small, { color: theme.subtext }]}>Select an item from View More.</Text>
                 )}
               </View>
+              <PoweredByFooter textColor={theme.subtext} borderColor={theme.steel} />
             </ScrollView>
           </SafeAreaView>
         </Modal>
@@ -5212,6 +5665,7 @@ function MainApp() {
                   </Pressable>
                 </>
               )}
+              <PoweredByFooter textColor={theme.subtext} borderColor={theme.steel} />
             </ScrollView>
           </SafeAreaView>
         </Modal>
@@ -5326,6 +5780,7 @@ function MainApp() {
                     );
                   })
                 )}
+                <PoweredByFooter textColor={theme.subtext} borderColor={theme.steel} />
               </ScrollView>
             </Animated.View>
           </SafeAreaView>
@@ -5517,6 +5972,7 @@ function MainApp() {
           postAdjustment={postAdjustment}
           movements={movements}
         />
+        <PoweredByFooter textColor={theme.subtext} borderColor={theme.steel} />
       </ScrollView>
     </SafeAreaView>
   );

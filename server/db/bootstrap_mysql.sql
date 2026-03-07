@@ -80,6 +80,36 @@ CREATE TABLE IF NOT EXISTS notification_preferences (
     ON UPDATE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+CREATE TABLE IF NOT EXISTS invoice_seller_settings (
+  id VARCHAR(32) NOT NULL,
+  seller_name VARCHAR(160) NOT NULL,
+  seller_gstin VARCHAR(20) NULL,
+  seller_address TEXT NOT NULL,
+  seller_state VARCHAR(80) NOT NULL,
+  seller_phone VARCHAR(30) NULL,
+  seller_email VARCHAR(160) NULL,
+  seller_website VARCHAR(200) NULL,
+  seller_pan VARCHAR(20) NULL,
+  bank_account_name VARCHAR(160) NULL,
+  bank_account_number VARCHAR(80) NULL,
+  bank_ifsc VARCHAR(20) NULL,
+  bank_branch VARCHAR(160) NULL,
+  declaration_note TEXT NULL,
+  footer_note TEXT NULL,
+  updated_by VARCHAR(64) NULL,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (id),
+  CONSTRAINT fk_invoice_seller_settings_updated_by
+    FOREIGN KEY (updated_by) REFERENCES users(id)
+    ON DELETE SET NULL
+    ON UPDATE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+INSERT IGNORE INTO invoice_seller_settings
+  (id, seller_name, seller_gstin, seller_address, seller_state)
+VALUES
+  ('default', 'FuElectric', NULL, 'New Delhi, Delhi, India', 'Delhi');
+
 -- 2) Inventory & catalog
 CREATE TABLE IF NOT EXISTS products (
   id VARCHAR(64) NOT NULL,
