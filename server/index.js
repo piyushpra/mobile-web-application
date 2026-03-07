@@ -425,7 +425,10 @@ function decorateInvoiceLine(line) {
     id: compactText(line.id),
     itemId: compactText(line.itemId),
     itemName: compactText(line.itemName) || 'Item',
-    description: compactText(line.description) || compactText(line.itemName) || 'Item',
+    description: buildInvoiceItemDescription(line),
+    brand: compactText(line.brand),
+    category: compactText(line.category),
+    model: compactText(line.model),
     sku: compactText(line.sku),
     unit: compactText(line.unit) || 'pcs',
     hsnCode: compactText(line.hsnCode),
@@ -590,10 +593,10 @@ function buildInvoiceDocument({
       id: compactText(line.id) || `il_${crypto.randomUUID().slice(0, 8)}`,
       itemId: compactText(line.itemId),
       itemName: compactText(line.itemName),
-      description:
-        compactText(line.description) ||
-        joinNonEmpty([line.itemName, line.model, line.capacity], ' • ') ||
-        compactText(line.itemName),
+      description: buildInvoiceItemDescription(line),
+      brand: compactText(line.brand),
+      category: compactText(line.category),
+      model: compactText(line.model),
       sku: compactText(line.sku),
       unit: compactText(line.unit) || 'pcs',
       hsnCode: compactText(line.hsnCode),
@@ -1685,17 +1688,19 @@ async function getInvoiceDownloadOwner(req, searchParams, orderId) {
 
 function renderStorefrontInvoiceHtml(order, invoice) {
   const safeOrder = order || {};
-  const safeInvoice = invoice || {};
+  const safeInvoice = decorateInvoiceDocument(invoice);
+  const summaryDisplay = getInvoiceSummaryDisplay(safeInvoice);
   const lines = Array.isArray(safeInvoice.lines) ? safeInvoice.lines : [];
   const escape = escapeHtml;
   const totals = [
-    ['Gross Amount', safeInvoice.subtotal],
+    ['Total Price', safeInvoice.subtotal],
+    ['Free Delivery', safeInvoice.deliveryFee],
     ['Discount', safeInvoice.discount],
-    ['Taxable Amount', safeInvoice.taxableTotal],
-    ['Included GST', safeInvoice.gstTotal],
-    [Number(safeInvoice.igstTotal || 0) > 0 ? 'IGST' : 'CGST', Number(safeInvoice.igstTotal || 0) > 0 ? safeInvoice.igstTotal : safeInvoice.cgstTotal],
-    [Number(safeInvoice.igstTotal || 0) > 0 ? null : 'SGST', Number(safeInvoice.igstTotal || 0) > 0 ? null : safeInvoice.sgstTotal],
-    ['Delivery', safeInvoice.deliveryFee],
+    [
+      summaryDisplay.isHaryanaLocation ? 'Included GST (9% CGST + 9% SGST)' : 'Included GST (18% IGST)',
+      summaryDisplay.gstTotal,
+    ],
+    ['Total Amount (Before GST)', summaryDisplay.amountBeforeGst],
   ]
     .filter(entry => entry[0])
     .map(([label, value]) => `<div class="row"><span>${escape(label)}</span><strong>${escape(formatCurrencyInrForHtml(value))}</strong></div>`)
@@ -1704,13 +1709,12 @@ function renderStorefrontInvoiceHtml(order, invoice) {
     .map(
       line => `
         <tr>
-          <td>${escape(line.itemName || 'Item')}<div class="sub">${escape(line.description || '')}</div></td>
+          <td>${escape(buildInvoiceItemDescription(line))}</td>
           <td>${escape(line.hsnCode || '-')}</td>
           <td>${escape(String(line.qty || 0))}</td>
           <td>${escape(formatCurrencyInrForHtml(line.unitPrice || 0))}</td>
-          <td>${escape(String(Number(line.taxRate || 0).toFixed(2)))}%</td>
+          <td>${escape(buildInvoiceTaxCellLines(line, summaryDisplay.isHaryanaLocation).join(' / '))}</td>
           <td>${escape(formatCurrencyInrForHtml(line.taxableValue || 0))}</td>
-          <td>${escape(formatCurrencyInrForHtml(line.gstAmount || 0))}</td>
           <td>${escape(formatCurrencyInrForHtml(line.lineTotal || 0))}</td>
         </tr>`,
     )
@@ -1728,7 +1732,6 @@ function renderStorefrontInvoiceHtml(order, invoice) {
     .eyebrow { color:#0f766e; font-size:12px; font-weight:800; text-transform:uppercase; letter-spacing:.08em; }
     h1 { margin:8px 0 4px; font-size:32px; line-height:1.1; }
     .subhead { color:#475569; font-size:14px; font-weight:600; }
-    .pill { display:inline-flex; align-items:center; padding:8px 14px; border-radius:999px; background:#dbeafe; color:#1d4ed8; font-weight:800; font-size:12px; }
     .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:12px; margin-bottom:18px; }
     .card { border:1px solid #e5e7eb; border-radius:18px; padding:16px; background:#fff; }
     .card h2 { margin:0 0 10px; font-size:12px; text-transform:uppercase; letter-spacing:.06em; color:#64748b; }
@@ -1755,7 +1758,6 @@ function renderStorefrontInvoiceHtml(order, invoice) {
         <h1>${escape(safeInvoice.invoiceNumber || safeOrder.orderNumber || 'Invoice')}</h1>
         <div class="subhead">${escape(safeOrder.orderNumber || '')} ${safeOrder.createdAt ? `• ${escape(String(safeOrder.createdAt))}` : ''}</div>
       </div>
-      <div class="pill">${escape(safeInvoice.status || safeOrder.status || 'Open')}</div>
     </div>
 
     <div class="grid">
@@ -1786,11 +1788,10 @@ function renderStorefrontInvoiceHtml(order, invoice) {
           <th>Item</th>
           <th>HSN</th>
           <th>Qty</th>
-          <th>Rate</th>
-          <th>GST</th>
-          <th>Taxable</th>
-          <th>GST Included</th>
-          <th>Total</th>
+          <th>Rate (INR)</th>
+          <th>Tax Rate / Included Tax (INR)</th>
+          <th>Taxable Value (INR)</th>
+          <th>Amount (INR)</th>
         </tr>
       </thead>
       <tbody>${lineMarkup}</tbody>
@@ -1803,9 +1804,14 @@ function renderStorefrontInvoiceHtml(order, invoice) {
         <p style="margin-top:12px;">This invoice shows GST already included in the line and payable amounts.</p>
       </div>
       <div class="card">
-        <h2>Payment Summary</h2>
+        <h2>Payment Summary (INR)</h2>
         ${totals}
-        <div class="row grand"><span>Total Amount</span><strong>${escape(formatCurrencyInrForHtml(safeInvoice.total || 0))}</strong></div>
+        <div class="row">
+          <span>${escape(summaryDisplay.isHaryanaLocation ? 'GST Distribution' : 'GST Distribution')}</span>
+          <strong>${escape(summaryDisplay.isHaryanaLocation ? `${formatCurrencyInrForHtml(summaryDisplay.cgstTotal)} + ${formatCurrencyInrForHtml(summaryDisplay.sgstTotal)}` : formatCurrencyInrForHtml(summaryDisplay.igstTotal))}</strong>
+        </div>
+        <div class="row grand"><span>Payable Amount</span><strong>${escape(formatCurrencyInrForHtml(summaryDisplay.payableAmount || 0))}</strong></div>
+        <div class="sub">${escape(summaryDisplay.isHaryanaLocation ? 'Payable amount includes 9% CGST + 9% SGST.' : 'Payable amount includes 18% IGST.')}</div>
       </div>
     </div>
   </div>
@@ -1818,7 +1824,67 @@ function formatCurrencyInrForHtml(value) {
 }
 
 function formatCurrencyInrForPdf(value) {
-  return `INR ${Number(value || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  return Number(value || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+function formatInvoicePercentage(value) {
+  const rate = clamp2(Math.max(0, parseNumber(value, 0)));
+  if (Number.isInteger(rate)) {
+    return `${rate}%`;
+  }
+  return `${rate.toFixed(2).replace(/\.?0+$/, '')}%`;
+}
+
+function buildInvoiceItemDescription(line) {
+  const safeLine = line || {};
+  const fallbackDescription = compactText(safeLine.description).replace(/\s*[•·]\s*/g, ' / ');
+  return (
+    joinNonEmpty([safeLine.brand, safeLine.category, safeLine.model], ' / ') ||
+    fallbackDescription ||
+    compactText(safeLine.itemName) ||
+    'Item'
+  );
+}
+
+function buildInvoiceTaxCellLines(line, intraState) {
+  const safeLine = line || {};
+  const taxRate = clamp2(Math.max(0, parseNumber(safeLine.taxRate, 0)));
+  const gstAmount = formatCurrencyInrForPdf(safeLine.gstAmount || 0);
+  if (taxRate <= 0) {
+    return ['0%', `Incl. ${gstAmount}`];
+  }
+  if (intraState) {
+    const halfRate = clamp2(taxRate / 2);
+    return [`${formatInvoicePercentage(halfRate)} + ${formatInvoicePercentage(taxRate - halfRate)}`, `Incl. ${gstAmount}`];
+  }
+  return [formatInvoicePercentage(taxRate), `Incl. ${gstAmount}`];
+}
+
+function invoiceUsesHaryanaBreakup(invoice) {
+  const safeInvoice = invoice || {};
+  return [safeInvoice.placeOfSupply, safeInvoice.shipToAddress, safeInvoice.billToAddress].some(value =>
+    compactText(value).toLowerCase().includes('haryana'),
+  );
+}
+
+function getInvoiceSummaryDisplay(invoice) {
+  const safeInvoice = invoice || {};
+  const payableAmount = clamp2(Math.max(0, parseNumber(safeInvoice.total, 0)));
+  const isHaryanaLocation = invoiceUsesHaryanaBreakup(safeInvoice);
+  const gstTotal = clamp2(payableAmount * 0.18);
+  const cgstTotal = isHaryanaLocation ? clamp2(payableAmount * 0.09) : 0;
+  const sgstTotal = isHaryanaLocation ? clamp2(payableAmount * 0.09) : 0;
+  const igstTotal = isHaryanaLocation ? 0 : gstTotal;
+  const amountBeforeGst = clamp2(Math.max(0, payableAmount - gstTotal));
+  return {
+    isHaryanaLocation,
+    payableAmount,
+    amountBeforeGst,
+    gstTotal,
+    cgstTotal,
+    sgstTotal,
+    igstTotal,
+  };
 }
 
 function escapePdfText(value) {
@@ -1966,7 +2032,7 @@ function renderPdfDocument(pageStreams) {
 function renderStorefrontInvoicePdf(order, invoice) {
   const safeOrder = order || {};
   const safeInvoice = decorateInvoiceDocument(invoice);
-  const taxBreakdown = getInvoiceTaxBreakdown(safeInvoice);
+  const summaryDisplay = getInvoiceSummaryDisplay(safeInvoice);
   const pageWidth = 595;
   const pageHeight = 842;
   const marginX = 36;
@@ -1982,14 +2048,13 @@ function renderStorefrontInvoicePdf(order, invoice) {
     success: [0.13, 0.46, 0.22],
   };
   const columns = [
-    { key: 'item', label: 'Item Description', width: 180, align: 'left' },
-    { key: 'hsn', label: 'HSN', width: 48, align: 'left' },
+    { key: 'item', label: 'Item Description', width: 178, align: 'left' },
+    { key: 'hsn', label: 'HSN/SAC', width: 46, align: 'left' },
     { key: 'qty', label: 'Qty', width: 28, align: 'right' },
-    { key: 'rate', label: 'Rate', width: 58, align: 'right' },
-    { key: 'gstRate', label: 'GST%', width: 38, align: 'right' },
-    { key: 'taxable', label: 'Taxable', width: 58, align: 'right' },
-    { key: 'gst', label: 'GST', width: 48, align: 'right' },
-    { key: 'total', label: 'Total', width: 62, align: 'right' },
+    { key: 'rate', label: 'Rate (INR)', width: 70, align: 'right' },
+    { key: 'tax', label: 'Tax Rate / Included Tax (INR)', width: 78, align: 'right' },
+    { key: 'taxable', label: 'Taxable Value (INR)', width: 58, align: 'right' },
+    { key: 'total', label: 'Amount (INR)', width: 65, align: 'right' },
   ];
 
   const pages = [];
@@ -2057,9 +2122,9 @@ function renderStorefrontInvoicePdf(order, invoice) {
   const infoLines = [
     `Order Ref: ${safeOrder.orderNumber || safeInvoice.orderNumber || '-'}`,
     `Invoice Date: ${toYmd(safeInvoice.createdAt) || '-'}`,
-    `Status: ${safeInvoice.status || safeOrder.status || 'Open'}`,
     `Place of Supply: ${safeInvoice.placeOfSupply || safeInvoice.sellerState || '-'}`,
-    'Prices on this invoice are GST inclusive.',
+    'All line rates and totals on this invoice are GST inclusive.',
+    'All monetary values are shown in INR.',
   ].flatMap(text =>
     wrapPdfText(text, 146, 8.5, 'F1').map(line => ({ text: line, font: 'F1', size: 8.5, color: colors.ink })),
   );
@@ -2078,18 +2143,22 @@ function renderStorefrontInvoicePdf(order, invoice) {
     ...(safeInvoice.footerNote ? wrapPdfText(`Note: ${safeInvoice.footerNote}`, 242, 8.5, 'F1', 5) : []),
   ];
   const summaryRows = [
-    { label: 'Gross Amount', value: formatCurrencyInrForPdf(safeInvoice.subtotal) },
+    { label: 'Total Price', value: formatCurrencyInrForPdf(safeInvoice.subtotal) },
+    { label: 'Free Delivery', value: formatCurrencyInrForPdf(safeInvoice.deliveryFee) },
     { label: 'Discount', value: formatCurrencyInrForPdf(safeInvoice.discount) },
-    { label: 'Delivery', value: formatCurrencyInrForPdf(safeInvoice.deliveryFee) },
-    { label: 'Taxable Amount', value: formatCurrencyInrForPdf(taxBreakdown.taxableTotal) },
-    ...(taxBreakdown.intraState
-      ? [
-          { label: 'CGST @ 9% (included)', value: formatCurrencyInrForPdf(taxBreakdown.cgstTotal) },
-          { label: 'SGST @ 9% (included)', value: formatCurrencyInrForPdf(taxBreakdown.sgstTotal) },
-        ]
-      : [{ label: 'IGST @ 18% (included)', value: formatCurrencyInrForPdf(taxBreakdown.igstTotal) }]),
-    { label: 'Included GST Total', value: formatCurrencyInrForPdf(taxBreakdown.gstTotal) },
-    { label: 'Total Amount', value: formatCurrencyInrForPdf(safeInvoice.total), bold: true },
+    {
+      label: summaryDisplay.isHaryanaLocation ? 'Included GST (9% CGST + 9% SGST)' : 'Included GST (18% IGST)',
+      value: formatCurrencyInrForPdf(summaryDisplay.gstTotal),
+      note: summaryDisplay.isHaryanaLocation
+        ? `9% ${formatCurrencyInrForPdf(summaryDisplay.cgstTotal)} + 9% ${formatCurrencyInrForPdf(summaryDisplay.sgstTotal)}`
+        : `18% ${formatCurrencyInrForPdf(summaryDisplay.igstTotal)}`,
+    },
+    {
+      label: 'Total Amount (Before GST)',
+      value: formatCurrencyInrForPdf(summaryDisplay.amountBeforeGst),
+      note: 'Amount after subtracting 18% GST from payable amount',
+    },
+    { label: 'Payable Amount', value: formatCurrencyInrForPdf(summaryDisplay.payableAmount), bold: true },
   ];
 
   const drawBlock = (page, x, top, width, title, lines) => {
@@ -2106,17 +2175,26 @@ function renderStorefrontInvoicePdf(order, invoice) {
   };
 
   const drawTableHeader = page => {
-    page.ops.push(buildRect(marginX, page.cursorTop, contentWidth, 22, { fillColor: colors.soft, strokeColor: colors.border }));
+    const headerLineGap = 8;
+    const headerLinesByColumn = columns.map(column => wrapPdfText(column.label, column.width - 12, 7.25, 'F2', 3));
+    const headerLineCount = Math.max(1, ...headerLinesByColumn.map(lines => lines.length));
+    const headerHeight = Math.max(22, 8 + headerLineCount * headerLineGap + 6);
+    page.ops.push(buildRect(marginX, page.cursorTop, contentWidth, headerHeight, { fillColor: colors.soft, strokeColor: colors.border }));
     let cursorX = marginX + 6;
-    columns.forEach(column => {
-      const labelX =
-        column.align === 'right'
-          ? estimateRightX(cursorX + column.width - 6, column.label, 8, 'F2')
-          : cursorX;
-      page.ops.push(buildText(column.label, labelX, page.cursorTop + 7, { font: 'F2', size: 8, color: colors.muted }));
+    columns.forEach((column, index) => {
+      const headerLines = headerLinesByColumn[index];
+      let headerTop = page.cursorTop + 7;
+      headerLines.forEach(text => {
+        const labelX =
+          column.align === 'right'
+            ? estimateRightX(cursorX + column.width - 6, text, 7.25, 'F2')
+            : cursorX;
+        page.ops.push(buildText(text, labelX, headerTop, { font: 'F2', size: 7.25, color: colors.muted }));
+        headerTop += headerLineGap;
+      });
       cursorX += column.width;
     });
-    page.cursorTop += 24;
+    page.cursorTop += headerHeight + 2;
   };
 
   const startPage = isFirstPage => {
@@ -2129,17 +2207,9 @@ function renderStorefrontInvoicePdf(order, invoice) {
     page.ops.push(buildText(safeInvoice.invoiceNumber || safeOrder.orderNumber || 'Invoice', marginX, 44, { font: 'F2', size: 15, color: colors.accent }));
     page.ops.push(
       buildText(
-        `Status: ${safeInvoice.status || safeOrder.status || 'Open'}`,
-        estimateRightX(rightEdge, `Status: ${safeInvoice.status || safeOrder.status || 'Open'}`, 10, 'F2'),
-        20,
-        { font: 'F2', size: 10, color: colors.success },
-      ),
-    );
-    page.ops.push(
-      buildText(
         `Order ID: ${safeOrder.orderNumber || safeInvoice.orderNumber || '-'}`,
         estimateRightX(rightEdge, `Order ID: ${safeOrder.orderNumber || safeInvoice.orderNumber || '-'}`, 9, 'F1'),
-        38,
+        22,
         { font: 'F1', size: 9, color: colors.muted },
       ),
     );
@@ -2147,7 +2217,7 @@ function renderStorefrontInvoicePdf(order, invoice) {
       buildText(
         `Date: ${toYmd(safeInvoice.createdAt) || '-'}`,
         estimateRightX(rightEdge, `Date: ${toYmd(safeInvoice.createdAt) || '-'}`, 9, 'F1'),
-        52,
+        36,
         { font: 'F1', size: 9, color: colors.muted },
       ),
     );
@@ -2173,9 +2243,20 @@ function renderStorefrontInvoicePdf(order, invoice) {
   });
 
   (Array.isArray(safeInvoice.lines) ? safeInvoice.lines : []).forEach(line => {
-    const titleLines = wrapPdfText(line.itemName || 'Item', columns[0].width - 12, 9, 'F2', 3);
-    const descriptionLines = wrapPdfText(line.description || '', columns[0].width - 12, 8, 'F1', 3);
-    const rowHeight = Math.max(28, 10 + titleLines.length * 10 + descriptionLines.length * 9);
+    const titleLines = wrapPdfText(buildInvoiceItemDescription(line), columns[0].width - 12, 9, 'F2', 4);
+    const rowCellLines = [
+      [compactText(line.hsnCode) || '-'],
+      [String(Math.max(0, parseNumber(line.qty, 0)))],
+      [formatCurrencyInrForPdf(line.unitPrice || 0)],
+      buildInvoiceTaxCellLines(line, summaryDisplay.isHaryanaLocation),
+      [formatCurrencyInrForPdf(line.taxableValue || 0)],
+      [formatCurrencyInrForPdf(line.lineTotal || 0)],
+    ];
+    const maxBodyLineCount = Math.max(
+      titleLines.length,
+      ...rowCellLines.map(cellLines => cellLines.length),
+    );
+    const rowHeight = Math.max(30, 14 + maxBodyLineCount * 10);
     if (page.cursorTop + rowHeight > pageHeight - marginBottom - 180) {
       page = startPage(false);
     }
@@ -2185,27 +2266,21 @@ function renderStorefrontInvoicePdf(order, invoice) {
       page.ops.push(buildText(text, marginX + 6, textTop, { font: 'F2', size: 9, color: colors.ink }));
       textTop += 10;
     });
-    descriptionLines.forEach(text => {
-      page.ops.push(buildText(text, marginX + 6, textTop, { font: 'F1', size: 8, color: colors.muted }));
-      textTop += 9;
-    });
-    const rowValues = [
-      compactText(line.hsnCode) || '-',
-      String(Math.max(0, parseNumber(line.qty, 0))),
-      formatCurrencyInrForPdf(line.unitPrice || 0),
-      `${Number(parseNumber(line.taxRate, 0)).toFixed(2)}%`,
-      formatCurrencyInrForPdf(line.taxableValue || 0),
-      formatCurrencyInrForPdf(line.gstAmount || 0),
-      formatCurrencyInrForPdf(line.lineTotal || 0),
-    ];
-    rowValues.forEach((value, index) => {
+    rowCellLines.forEach((cellLines, index) => {
       const column = columns[index + 1];
       const leftEdge = marginX + columns.slice(0, index + 1).reduce((sum, entry) => sum + entry.width, 0);
-      const x =
-        column.align === 'right'
-          ? estimateRightX(itemRightEdges[index + 1], value, 8.5, 'F1')
-          : leftEdge + 6;
-      page.ops.push(buildText(value, x, page.cursorTop + 9, { font: 'F1', size: 8.5, color: colors.ink }));
+      let cellTop = page.cursorTop + 9;
+      cellLines.forEach((value, lineIndex) => {
+        const font = index === 3 && lineIndex === 0 ? 'F2' : 'F1';
+        const size = index === 3 && lineIndex === 1 ? 8 : 8.5;
+        const color = index === 3 && lineIndex === 1 ? colors.muted : colors.ink;
+        const x =
+          column.align === 'right'
+            ? estimateRightX(itemRightEdges[index + 1], value, size, font)
+            : leftEdge + 6;
+        page.ops.push(buildText(value, x, cellTop, { font, size, color }));
+        cellTop += 9;
+      });
     });
     page.cursorTop += rowHeight;
   });
@@ -2215,7 +2290,8 @@ function renderStorefrontInvoicePdf(order, invoice) {
     amountWordsLines.length * 11 +
     (bankLines.length > 0 ? 18 + bankLines.length * 10 : 0) +
     (noteLines.length > 0 ? 16 + noteLines.length * 10 : 0);
-  const summaryHeight = 48 + summaryRows.length * 16 + 34;
+  const summaryNotesHeight = summaryRows.reduce((sum, row) => sum + (row.note ? 10 : 0), 0);
+  const summaryHeight = 48 + summaryRows.length * 16 + summaryNotesHeight + 34;
   const finalBlockHeight = Math.max(summaryHeight, notesHeight) + 24;
   if (page.cursorTop + finalBlockHeight > pageHeight - marginBottom) {
     page = startPage(false);
@@ -2250,7 +2326,7 @@ function renderStorefrontInvoicePdf(order, invoice) {
   }
 
   const summaryX = marginX + notesWidth + 16;
-  page.ops.push(buildText('Payment Summary', summaryX + 10, notesTop + 10, { font: 'F2', size: 10, color: colors.accent }));
+  page.ops.push(buildText('Payment Summary (INR)', summaryX + 10, notesTop + 10, { font: 'F2', size: 10, color: colors.accent }));
   let summaryCursorTop = notesTop + 28;
   summaryRows.forEach(row => {
     page.ops.push(
@@ -2269,13 +2345,19 @@ function renderStorefrontInvoicePdf(order, invoice) {
       ),
     );
     summaryCursorTop += 16;
+    if (row.note) {
+      page.ops.push(buildText(row.note, summaryX + 10, summaryCursorTop - 2, { font: 'F1', size: 8, color: colors.muted }));
+      summaryCursorTop += 10;
+    }
   });
   summaryCursorTop += 4;
   page.ops.push(buildLine(summaryX + 10, summaryCursorTop, summaryX + summaryWidth - 10, summaryCursorTop, { color: colors.border, width: 1 }));
   summaryCursorTop += 12;
   page.ops.push(
     buildText(
-      taxBreakdown.intraState ? 'GST breakup shown as 9% CGST + 9% SGST.' : 'GST breakup shown as 18% IGST.',
+      summaryDisplay.isHaryanaLocation
+        ? 'Payable amount includes 9% CGST + 9% SGST.'
+        : 'Payable amount includes 18% IGST.',
       summaryX + 10,
       summaryCursorTop,
       { font: 'F1', size: 8.5, color: colors.muted },
@@ -3202,6 +3284,9 @@ function mapInvoiceLineFromDbRow(row) {
     itemId: row.item_id || row.product_id,
     itemName: row.item_name,
     description: row.description,
+    brand: row.brand,
+    category: row.category,
+    model: row.model,
     sku: row.sku,
     unit: row.unit,
     hsnCode: row.hsn_code,
@@ -3310,6 +3395,9 @@ async function fetchInvoicesByOrderIds(conn, orderIds) {
               il.product_id AS item_id,
               COALESCE(NULLIF(il.item_name, ''), COALESCE(p.name, 'Unknown Item')) AS item_name,
               COALESCE(NULLIF(il.description, ''), COALESCE(p.name, 'Unknown Item')) AS description,
+              COALESCE(NULLIF(p.brand, ''), '') AS brand,
+              COALESCE(NULLIF(p.category, ''), '') AS category,
+              COALESCE(NULLIF(p.model, ''), COALESCE(NULLIF(il.sku, ''), COALESCE(p.sku, ''))) AS model,
               COALESCE(NULLIF(il.sku, ''), COALESCE(p.sku, '')) AS sku,
               COALESCE(NULLIF(il.unit, ''), COALESCE(p.unit, 'pcs')) AS unit,
               COALESCE(NULLIF(il.hsn_code, ''), COALESCE(p.hsn_code, '')) AS hsn_code,
@@ -3502,6 +3590,9 @@ async function readDb() {
               il.product_id AS item_id,
               COALESCE(NULLIF(il.item_name, ''), COALESCE(p.name, 'Unknown Item')) AS item_name,
               COALESCE(NULLIF(il.description, ''), COALESCE(p.name, 'Unknown Item')) AS description,
+              COALESCE(NULLIF(p.brand, ''), '') AS brand,
+              COALESCE(NULLIF(p.category, ''), '') AS category,
+              COALESCE(NULLIF(p.model, ''), COALESCE(NULLIF(il.sku, ''), COALESCE(p.sku, ''))) AS model,
               COALESCE(NULLIF(il.sku, ''), COALESCE(p.sku, '')) AS sku,
               COALESCE(NULLIF(il.unit, ''), COALESCE(p.unit, 'pcs')) AS unit,
               COALESCE(NULLIF(il.hsn_code, ''), COALESCE(p.hsn_code, '')) AS hsn_code,
@@ -4155,7 +4246,7 @@ function writeDb(db) {
               invoice.id,
               line.itemId,
               compactText(line.itemName) || 'Item',
-              compactText(line.description) || compactText(line.itemName) || 'Item',
+              buildInvoiceItemDescription(line),
               compactText(line.sku) || null,
               compactText(line.unit) || 'pcs',
               compactText(line.hsnCode) || null,
@@ -5110,7 +5201,9 @@ function extractItemSummary(db, itemId) {
   return {
     itemId: item.id,
     itemName: item.name,
-    description: joinNonEmpty([item.name, item.model, item.capacityAh], ' • ') || item.name,
+    description: buildInvoiceItemDescription(item),
+    brand: item.brand || '',
+    category: item.category || '',
     model: item.model || '',
     capacity: item.capacityAh || '',
     sku: item.sku,
@@ -5828,6 +5921,8 @@ const server = http.createServer(async (req, res) => {
                   ci.unit_price,
                   ci.qty,
                   COALESCE(p.name, 'Product') AS product_name,
+                  COALESCE(NULLIF(p.brand, ''), '') AS product_brand,
+                  COALESCE(NULLIF(p.category, ''), '') AS product_category,
                   COALESCE(NULLIF(p.model, ''), p.sku, '') AS product_model,
                   COALESCE(p.sku, '') AS sku,
                   COALESCE(p.unit, 'pcs') AS unit,
@@ -5944,6 +6039,8 @@ const server = http.createServer(async (req, res) => {
           const unitPrice = parseNumber(row.unit_price, 0);
           const qty = parseNumber(row.qty, 0);
           const productName = row.product_name || 'Product';
+          const productBrand = row.product_brand || '';
+          const productCategory = row.product_category || '';
           const productModel = row.product_model || '';
           const capacity = row.capacity || '150Ah';
           await conn.query(
@@ -5965,7 +6062,15 @@ const server = http.createServer(async (req, res) => {
             id: `il_${crypto.randomUUID().slice(0, 8)}`,
             itemId: row.product_id,
             itemName: productName,
-            description: joinNonEmpty([productName, productModel, capacity], ' • ') || productName,
+            description: buildInvoiceItemDescription({
+              itemName: productName,
+              brand: productBrand,
+              category: productCategory,
+              model: productModel,
+            }),
+            brand: productBrand,
+            category: productCategory,
+            model: productModel,
             sku: row.sku || '',
             unit: row.unit || 'pcs',
             hsnCode: row.hsn_code || '',
