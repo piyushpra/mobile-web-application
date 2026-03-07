@@ -224,6 +224,27 @@ function formatDisplayDate(value?: string) {
   });
 }
 
+function formatIstDateYmd(value?: string) {
+  const raw = String(value || '').trim();
+  if (!raw) {
+    return '';
+  }
+  const dt = new Date(raw);
+  if (Number.isNaN(dt.getTime())) {
+    return raw;
+  }
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Kolkata',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(dt);
+  const year = parts.find(part => part.type === 'year')?.value || '';
+  const month = parts.find(part => part.type === 'month')?.value || '';
+  const day = parts.find(part => part.type === 'day')?.value || '';
+  return year && month && day ? `${year}-${month}-${day}` : raw;
+}
+
 function getInvoiceStatusColors(status: string) {
   const normalized = String(status || '').trim().toLowerCase();
   if (normalized === 'paid') {
@@ -288,6 +309,12 @@ function buildOrderItemMetaText(title: unknown, model: unknown, capacity: unknow
   }
 
   return parts.join(' • ');
+}
+
+function textContainsState(value: unknown, stateName: string) {
+  const haystack = normalizeComparableText(value);
+  const needle = normalizeComparableText(stateName);
+  return Boolean(haystack && needle && haystack.includes(needle));
 }
 
 function normalizeOrderStatus(value: unknown): ProfileOrder['status'] {
@@ -959,7 +986,7 @@ function MainApp() {
 
       const messageParts = [`Current: ${currentVersion}`, `Latest: ${latestVersion}`];
       if (publishedAt) {
-        messageParts.push(`Published: ${publishedAt}`);
+        messageParts.push(`Published: ${formatIstDateYmd(publishedAt)}`);
       }
       if (releaseNotes) {
         messageParts.push('', releaseNotes);
@@ -3211,6 +3238,28 @@ function MainApp() {
     () => getInvoiceStatusColors(selectedInvoice?.status || 'Open'),
     [selectedInvoice],
   );
+  const selectedInvoiceGstDisplay = useMemo(() => {
+    const payableAmount = toFiniteNumber(selectedInvoice?.total, toFiniteNumber(selectedInvoiceOrder?.total, 0));
+    const isHaryanaLocation = [
+      selectedInvoice?.placeOfSupply,
+      selectedInvoice?.shipToAddress,
+      selectedInvoice?.billToAddress,
+    ].some(value => textContainsState(value, 'Haryana'));
+    const gstTotal = Number((payableAmount * 0.18).toFixed(2));
+    const cgstTotal = isHaryanaLocation ? Number((payableAmount * 0.09).toFixed(2)) : 0;
+    const sgstTotal = isHaryanaLocation ? Number((payableAmount * 0.09).toFixed(2)) : 0;
+    const igstTotal = isHaryanaLocation ? 0 : gstTotal;
+    const amountBeforeGst = Math.max(0, Number((payableAmount - gstTotal).toFixed(2)));
+    return {
+      isHaryanaLocation,
+      payableAmount,
+      amountBeforeGst,
+      gstTotal,
+      cgstTotal,
+      sgstTotal,
+      igstTotal,
+    };
+  }, [selectedInvoice, selectedInvoiceOrder?.total]);
   const orderDetailPalette = useMemo(
     () => ({
       background: profileDarkMode ? '#0B1220' : '#EEF2F3',
@@ -4055,8 +4104,17 @@ function MainApp() {
                 onPress={() => selectedInvoiceOrder && downloadInvoiceForOrder(selectedInvoiceOrder)}
                 disabled={!selectedInvoiceOrder?.invoice || invoiceDownloadOrderId === selectedInvoiceOrder?.id}
               >
-                <Text style={[styles.orderDetailHeaderActionText, { color: orderDetailPalette.accentText }]}>
-                  {invoiceDownloadOrderId === selectedInvoiceOrder?.id ? '...' : 'Save'}
+                <Text
+                  style={[
+                    styles.orderDetailHeaderActionText,
+                    {
+                      color: orderDetailPalette.accentText,
+                      fontSize: invoiceDownloadOrderId === selectedInvoiceOrder?.id ? 12 : 18,
+                      lineHeight: invoiceDownloadOrderId === selectedInvoiceOrder?.id ? 12 : 18,
+                    },
+                  ]}
+                >
+                  {invoiceDownloadOrderId === selectedInvoiceOrder?.id ? '...' : '🧾'}
                 </Text>
               </Pressable>
             </View>
@@ -4226,15 +4284,39 @@ function MainApp() {
                     </Text>
                   </View>
                   <View style={styles.orderDetailSummaryRow}>
-                    <Text style={[styles.orderDetailSummaryLabel, { color: orderDetailPalette.subtext }]}>Included GST</Text>
+                    <View style={{ flex: 1 }}>
+                      <Text style={[styles.orderDetailSummaryLabel, { color: orderDetailPalette.subtext }]}>
+                        {selectedInvoiceGstDisplay.isHaryanaLocation
+                          ? 'Included GST (9% CGST + 9% SGST)'
+                          : 'Included GST (18% IGST)'}
+                      </Text>
+                      <Text style={[styles.orderDetailSummaryNote, { color: orderDetailPalette.subtext }]}>
+                        {selectedInvoiceGstDisplay.isHaryanaLocation
+                          ? `9% ${formatCurrency(selectedInvoiceGstDisplay.cgstTotal)} + 9% ${formatCurrency(selectedInvoiceGstDisplay.sgstTotal)}`
+                          : `18% ${formatCurrency(selectedInvoiceGstDisplay.igstTotal)}`}
+                      </Text>
+                    </View>
                     <Text style={[styles.orderDetailSummaryAccent, { color: orderDetailPalette.successText }]}>
-                      {formatCurrency(selectedInvoice?.gstTotal ?? 0)}
+                      {formatCurrency(selectedInvoiceGstDisplay.gstTotal)}
+                    </Text>
+                  </View>
+                  <View style={styles.orderDetailSummaryRow}>
+                    <View style={{ flex: 1 }}>
+                      <Text style={[styles.orderDetailSummaryLabel, { color: orderDetailPalette.subtext }]}>
+                        Total Amount (Before GST)
+                      </Text>
+                      <Text style={[styles.orderDetailSummaryNote, { color: orderDetailPalette.subtext }]}>
+                        Amount after subtracting 18% GST from payable amount
+                      </Text>
+                    </View>
+                    <Text style={[styles.orderDetailSummaryValue, { color: orderDetailPalette.title }]}>
+                      {formatCurrency(selectedInvoiceGstDisplay.amountBeforeGst)}
                     </Text>
                   </View>
                   <View style={[styles.orderDetailSummaryTotalRow, { borderTopColor: orderDetailPalette.border }]}>
-                    <Text style={[styles.orderDetailSummaryTotalLabel, { color: orderDetailPalette.title }]}>Total Amount</Text>
+                    <Text style={[styles.orderDetailSummaryTotalLabel, { color: orderDetailPalette.title }]}>Payable Amount</Text>
                     <Text style={[styles.orderDetailSummaryTotalValue, { color: orderDetailPalette.title }]}>
-                      {formatCurrency(selectedInvoice?.total ?? selectedInvoiceOrder.total)}
+                      {formatCurrency(selectedInvoiceGstDisplay.payableAmount)}
                     </Text>
                   </View>
                   <View style={styles.orderDetailSummaryFooter}>
@@ -4242,7 +4324,9 @@ function MainApp() {
                       {selectedInvoice ? selectedInvoice.status : selectedInvoiceOrder.status}
                     </Text>
                     <Text style={[styles.orderDetailPaymentNote, { color: orderDetailPalette.subtext }]}>
-                      GST is already included in the payable amount.
+                      {selectedInvoiceGstDisplay.isHaryanaLocation
+                        ? 'Payable amount includes 9% CGST + 9% SGST.'
+                        : 'Payable amount includes 18% IGST.'}
                     </Text>
                   </View>
                 </View>
@@ -4362,7 +4446,7 @@ function MainApp() {
               </Text>
               {availableAppUpdate?.publishedAt ? (
                 <Text style={[styles.updateModalMeta, { color: theme.subtext }]}>
-                  Published {availableAppUpdate.publishedAt}
+                  Published {formatIstDateYmd(availableAppUpdate.publishedAt)}
                 </Text>
               ) : null}
               {availableAppUpdate?.fileSizeBytes ? (

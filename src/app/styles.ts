@@ -2824,6 +2824,12 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: '700',
   },
+  orderDetailSummaryNote: {
+    fontSize: 12,
+    lineHeight: 16,
+    fontWeight: '600',
+    marginTop: 4,
+  },
   orderDetailSummaryValue: {
     fontSize: 14,
     fontWeight: '900',
