@@ -30,7 +30,7 @@ export const darkTheme: Theme = {
   warning: '#FACC15',
 };
 
-const PUBLIC_API_ORIGIN = 'http://13.235.49.124:4000';
+const PUBLIC_API_ORIGIN = 'http://13.235.49.124';
 
 export const API_BASE = Platform.select({
   android: PUBLIC_API_ORIGIN,

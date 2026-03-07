@@ -130,6 +130,54 @@ If your PM2 process name matches the folder name, the restart command would be:
 EC2_HOST=<your-ec2-host> ./scripts/ec2-run.sh pm2 restart mobile-web-application
 ```
 
+## Nginx Reverse Proxy On EC2
+
+Use Node on internal port `4000` and expose the app publicly through Nginx on port `80`.
+
+HTTP setup on Ubuntu EC2:
+
+```sh
+sudo apt update
+sudo apt install -y nginx
+sudo cp deploy/nginx/fuelectric-http.conf /etc/nginx/sites-available/fuelectric-api
+sudo ln -sfn /etc/nginx/sites-available/fuelectric-api /etc/nginx/sites-enabled/fuelectric-api
+sudo rm -f /etc/nginx/sites-enabled/default
+sudo nginx -t
+sudo systemctl reload nginx
+```
+
+Backend restart:
+
+```sh
+cd /opt/mobile/mobile-web-application
+APP_ENV=production pm2 restart mobile-api --update-env
+```
+
+Security group / firewall:
+
+- allow inbound `80/tcp`
+- allow inbound `443/tcp` when HTTPS is enabled
+- once Nginx is working, remove public inbound access to `4000/tcp`
+
+HTTP verification:
+
+```sh
+curl http://13.235.49.124/health
+curl http://13.235.49.124/api/public/products
+curl -X POST http://13.235.49.124/api/auth/login \
+  -H 'Content-Type: application/json' \
+  -d '{"username":"admin","password":"admin123"}'
+```
+
+HTTPS on `443`:
+
+- use a real domain such as `api.example.com`; do not use a raw IP for production TLS
+- use [deploy/nginx/fuelectric-https.conf.example](/Users/piyush/Downloads/my-personal-application/mobile/deploy/nginx/fuelectric-https.conf.example) as the starting point
+- set `server_name` and certificate paths
+- install a certificate with Certbot or your existing CA flow
+
+When Nginx is in front, the mobile app should call `http://13.235.49.124` now, or `https://<your-domain>` once TLS is ready.
+
 ## Forgot Password Email Reset
 
 The backend now supports a standard reset-link flow:
@@ -144,7 +192,7 @@ Required config in [config/production.env](/Users/piyush/Downloads/my-personal-a
 
 ```sh
 APP_NAME=Mobile Application
-AUTH_PUBLIC_BASE_URL=http://13.235.49.124:4000
+AUTH_PUBLIC_BASE_URL=http://13.235.49.124
 AUTH_RESET_TOKEN_TTL_MS=900000
 AUTH_RESET_REQUEST_COOLDOWN_MS=60000
 
@@ -249,7 +297,7 @@ APP_ENV=production pm2 restart mobile-api --update-env
 Test the update endpoint:
 
 ```sh
-curl "http://13.235.49.124:4000/api/public/app-update?appId=com.mobile&channel=production&platform=android&currentVersion=1.0.0"
+curl "http://13.235.49.124/api/public/app-update?appId=com.mobile&channel=production&platform=android&currentVersion=1.0.0"
 ```
 
 Important:

@@ -5100,15 +5100,19 @@ async function createEntityRoutes({ pathname, req, res, db, collection, typeName
 
 const server = http.createServer(async (req, res) => {
   const parsedUrl = new URL(req.url || '/', `http://${req.headers.host}`);
-  const { pathname, searchParams } = parsedUrl;
+  const rawPathname = parsedUrl.pathname;
+  const pathname = rawPathname.startsWith('/api/public/store/')
+    ? rawPathname.replace('/api/public/store/', '/api/public/')
+    : rawPathname;
+  const { searchParams } = parsedUrl;
 
   if (req.method === 'OPTIONS') {
     sendJson(res, 204, {});
     return;
   }
 
-  if ((req.method === 'GET' || req.method === 'HEAD') && pathname.startsWith(STATIC_URL_PREFIX)) {
-    await serveStaticAsset(req, res, pathname);
+  if ((req.method === 'GET' || req.method === 'HEAD') && rawPathname.startsWith(STATIC_URL_PREFIX)) {
+    await serveStaticAsset(req, res, rawPathname);
     return;
   }
 
@@ -7226,12 +7230,12 @@ const server = http.createServer(async (req, res) => {
   } catch (error) {
     const mapped = toErrorResponse(error);
     if (mapped.isServerError) {
-      console.error(`[${new Date().toISOString()}] ${req.method} ${pathname}`, error);
+      console.error(`[${new Date().toISOString()}] ${req.method} ${rawPathname}`, error);
     }
     sendError(res, mapped.status, mapped.message);
   }
 });
 
-server.listen(PORT, () => {
-  console.log(`Inventory API running at http://localhost:${PORT}`);
+server.listen(PORT, '0.0.0.0', () => {
+  console.log(`Inventory API running on 0.0.0.0:${PORT}`);
 });
