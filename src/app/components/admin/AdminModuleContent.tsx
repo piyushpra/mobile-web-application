@@ -4,8 +4,13 @@ import { Animated, Image, Keyboard, Modal, Pressable, ScrollView, Text, TextInpu
 import ListRow from '../ListRow';
 import Picker from '../Picker';
 import Stat from '../Stat';
-import { ITEM_CATEGORY_OPTIONS, ITEM_TECHNOLOGY_OPTIONS } from '../../constants';
+import { ITEM_CATEGORY_OPTIONS, ITEM_TECHNOLOGY_OPTIONS, darkTheme } from '../../constants';
 import styles from '../../styles';
+import {
+  applyItemCapacitySelection,
+  resolveItemCapacityInputMode,
+  type ItemCapacityInputMode,
+} from '../../utils/itemCapacity';
 
 type Props = any;
 const MANUAL_CAPACITY_OPTION_ID = '__manual_capacity__';
@@ -30,6 +35,7 @@ function AdminModuleContent(props: Props) {
     setItemTechnologyOption,
     itemCapacityAh,
     setItemCapacityAh,
+    itemDraftVersion,
     itemQty,
     setItemQty,
     itemReorder,
@@ -72,6 +78,7 @@ function AdminModuleContent(props: Props) {
     customers,
     canDeleteMaster,
     deleteParty,
+    deleteItem,
     selectedItemId,
     setSelectedItemId,
     items,
@@ -100,7 +107,11 @@ function AdminModuleContent(props: Props) {
     postAdjustment,
     movements,
   } = props;
-  const ahOptions = ['110Ah', '120Ah', '150Ah', '200Ah', '220Ah'].map(cap => ({ id: cap, label: cap }));
+  const ahOptions = React.useMemo(
+    () => ['110Ah', '120Ah', '150Ah', '200Ah', '220Ah'].map(cap => ({ id: cap, label: cap })),
+    [],
+  );
+  const isDarkMode = theme.bg === darkTheme.bg;
   const categoryOptions = React.useMemo(
     () => ITEM_CATEGORY_OPTIONS.map(category => ({ id: category, label: category })),
     [],
@@ -118,7 +129,10 @@ function AdminModuleContent(props: Props) {
   );
   const [isCreateBrandDropdownVisible, setIsCreateBrandDropdownVisible] = React.useState(false);
   const [isEditBrandDropdownVisible, setIsEditBrandDropdownVisible] = React.useState(false);
-  const [isManualCapacityMode, setIsManualCapacityMode] = React.useState(false);
+  const [capacityInputMode, setCapacityInputMode] = React.useState<ItemCapacityInputMode>(() =>
+    resolveItemCapacityInputMode(itemCapacityAh, presetCapacityValues),
+  );
+  const [itemsView, setItemsView] = React.useState<'form' | 'inventory'>('form');
   const brandDropdownCloseTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const clearBrandDropdownCloseTimer = React.useCallback(() => {
@@ -170,17 +184,16 @@ function AdminModuleContent(props: Props) {
   }, [isItemEditModalVisible]);
 
   React.useEffect(() => {
-    const rawCapacity = String(itemCapacityAh || '').trim();
-    if (!rawCapacity) {
-      if (editingItemId || (!String(itemName || '').trim() && !String(itemSku || '').trim())) {
-        setIsManualCapacityMode(false);
-      }
-      return;
-    }
-    setIsManualCapacityMode(!presetCapacityValues.includes(rawCapacity));
-  }, [editingItemId, itemCapacityAh, itemName, itemSku, presetCapacityValues]);
+    setCapacityInputMode(resolveItemCapacityInputMode(itemCapacityAh, presetCapacityValues));
+  }, [itemDraftVersion, presetCapacityValues]);
 
   React.useEffect(() => () => clearBrandDropdownCloseTimer(), [clearBrandDropdownCloseTimer]);
+
+  React.useEffect(() => {
+    if (moduleId !== 'items') {
+      setItemsView('form');
+    }
+  }, [moduleId]);
 
   const toBrandLabel = React.useCallback((value: string) => {
     const lower = value.toLowerCase();
@@ -233,20 +246,12 @@ function AdminModuleContent(props: Props) {
 
   const handleCapacitySelect = React.useCallback(
     (selectedId: string) => {
-      if (!selectedId || selectedId === NO_CAPACITY_OPTION_ID) {
-        setIsManualCapacityMode(false);
-        setItemCapacityAh('');
-        return;
-      }
-      if (selectedId === MANUAL_CAPACITY_OPTION_ID) {
-        setIsManualCapacityMode(true);
-        if (presetCapacityValues.includes(String(itemCapacityAh || '').trim())) {
-          setItemCapacityAh('');
-        }
-        return;
-      }
-      setIsManualCapacityMode(false);
-      setItemCapacityAh(selectedId);
+      const next = applyItemCapacitySelection(itemCapacityAh, selectedId, presetCapacityValues, {
+        manualOptionId: MANUAL_CAPACITY_OPTION_ID,
+        noCapacityOptionId: NO_CAPACITY_OPTION_ID,
+      });
+      setCapacityInputMode(next.mode);
+      setItemCapacityAh(next.value);
     },
     [itemCapacityAh, presetCapacityValues, setItemCapacityAh],
   );
@@ -336,206 +341,289 @@ function AdminModuleContent(props: Props) {
       {moduleId === 'items' && (
         <View style={[styles.card, { backgroundColor: theme.panel }]}> 
           <Text style={[styles.title, { color: theme.text }]}>Items</Text>
-          <View style={[styles.form, { backgroundColor: theme.panelSoft }]}> 
-            <Text style={[styles.small, styles.fieldLabel, { color: theme.subtext }]}>Item Name</Text>
-            <TextInput value={itemName} onChangeText={setItemName} placeholder="Item Name*" placeholderTextColor={theme.subtext} style={[styles.input, { color: theme.text, backgroundColor: theme.steel }]} />
-            <Text style={[styles.small, styles.fieldLabel, { color: theme.subtext }]}>HSN/SAC</Text>
-            <TextInput value={itemSku} onChangeText={setItemSku} placeholder="HSN/SAC*" placeholderTextColor={theme.subtext} style={[styles.input, { color: theme.text, backgroundColor: theme.steel }]} />
-            <Text style={[styles.small, styles.fieldLabel, { color: theme.subtext }]}>Brand</Text>
-            <View style={styles.brandInputWrap}>
-              <TextInput
-                value={itemBrand}
-                onChangeText={value => handleBrandInputChange('create', value)}
-                onFocus={() => showBrandDropdown('create')}
-                onPressIn={() => showBrandDropdown('create')}
-                onBlur={() => scheduleCloseBrandDropdown('create')}
-                placeholder="Brand"
-                placeholderTextColor={theme.subtext}
-                style={[styles.input, { color: theme.text, backgroundColor: theme.steel }]}
-              />
-              {isCreateBrandDropdownVisible ? (
-                <ScrollView
-                  style={[styles.brandDropdown, { backgroundColor: theme.panel, borderColor: theme.steel }]}
-                  nestedScrollEnabled
-                  keyboardShouldPersistTaps="always"
-                  showsVerticalScrollIndicator
-                >
-                  {(filteredBrandOptions.length > 0 ? filteredBrandOptions : brandOptions).map(brand => (
-                    <Pressable
-                      key={`brand_${brand.toLowerCase().replace(/[^a-z0-9]+/g, '_')}`}
-                      style={styles.brandDropdownItem}
-                      onPressIn={clearBrandDropdownCloseTimer}
-                      onPress={() => handleBrandSelect('create', brand)}
-                    >
-                      <Text style={[styles.brandDropdownText, { color: theme.text }]}>{brand}</Text>
-                    </Pressable>
-                  ))}
-                  <View style={[styles.brandDropdownDivider, { backgroundColor: theme.steel }]} />
-                  <Pressable
-                    style={[styles.brandDropdownItem, styles.brandDropdownItemLast]}
-                    onPressIn={clearBrandDropdownCloseTimer}
-                    onPress={() => enableManualBrandEntry('create')}
-                  >
-                    <Text style={styles.brandDropdownManualText}>+ Manual Entry</Text>
-                  </Pressable>
-                </ScrollView>
-              ) : null}
-            </View>
-            <Picker
-              label="Category"
-              selectedId={itemCategory}
-              options={categoryOptions}
-              onSelect={setItemCategory}
-              theme={theme}
-            />
-            <Picker
-              label="Technology (Optional)"
-              selectedId={itemTechnologyOption}
-              options={technologyOptions}
-              onSelect={setItemTechnologyOption}
-              theme={theme}
-              allowDeselect
-            />
-            <Picker
-              label="Capacity (Ah) (Optional)"
-              selectedId={isManualCapacityMode ? MANUAL_CAPACITY_OPTION_ID : itemCapacityAh || NO_CAPACITY_OPTION_ID}
-              options={capacityOptions}
-              onSelect={handleCapacitySelect}
-              theme={theme}
-            />
-            {isManualCapacityMode ? (
-              <>
-                <Text style={[styles.small, styles.fieldLabel, { color: theme.subtext }]}>Manual Capacity (Ah) (Optional)</Text>
-                <TextInput
-                  value={manualCapacityValue}
-                  onChangeText={handleManualCapacityChange}
-                  placeholder="e.g. 135"
-                  keyboardType="numeric"
-                  placeholderTextColor={theme.subtext}
-                  style={[styles.input, { color: theme.text, backgroundColor: theme.steel }]}
-                />
-              </>
-            ) : null}
-            <Text style={[styles.small, styles.fieldLabel, { color: theme.subtext }]}>Tags (Optional)</Text>
-            <View style={styles.itemTagRow}>
-              {itemTagOptions.map(tag => {
-                const active = selectedItemTags.includes(tag.id);
-                return (
-                  <Pressable
-                    key={tag.id}
-                    style={[
-                      styles.itemTagChip,
-                      { backgroundColor: active ? theme.primary : theme.steel, borderColor: active ? theme.primary : '#CBD5E1' },
-                    ]}
-                    onPress={() => toggleItemTag(tag.id)}
-                  >
-                    <Text style={[styles.itemTagChipText, { color: active ? '#FFFFFF' : theme.text }]}>{tag.label}</Text>
-                  </Pressable>
-                );
-              })}
-            </View>
-            <View style={styles.row}>
-              <View style={styles.half}>
-                <Text style={[styles.small, styles.fieldLabel, { color: theme.subtext }]}>Quantity</Text>
-                <TextInput value={itemQty} onChangeText={v => setItemQty(v.replace(/[^0-9]/g, ''))} placeholder="Qty" keyboardType="numeric" placeholderTextColor={theme.subtext} style={[styles.input, { color: theme.text, backgroundColor: theme.steel }]} />
-              </View>
-              <View style={styles.half}>
-                <Text style={[styles.small, styles.fieldLabel, { color: theme.subtext }]}>Reorder Level</Text>
-                <TextInput value={itemReorder} onChangeText={v => setItemReorder(v.replace(/[^0-9]/g, ''))} placeholder="Reorder" keyboardType="numeric" placeholderTextColor={theme.subtext} style={[styles.input, { color: theme.text, backgroundColor: theme.steel }]} />
-              </View>
-            </View>
-            <View style={styles.row}>
-              <View style={styles.half}>
-                <Text style={[styles.small, styles.fieldLabel, { color: theme.subtext }]}>Purchase Price</Text>
-                <TextInput value={itemPurchasePrice} onChangeText={v => setItemPurchasePrice(v.replace(/[^0-9.]/g, ''))} placeholder="Purchase" keyboardType="decimal-pad" placeholderTextColor={theme.subtext} style={[styles.input, { color: theme.text, backgroundColor: theme.steel }]} />
-              </View>
-              <View style={styles.half}>
-                <Text style={[styles.small, styles.fieldLabel, { color: theme.subtext }]}>Selling Price</Text>
-                <TextInput value={itemSellingPrice} onChangeText={v => setItemSellingPrice(v.replace(/[^0-9.]/g, ''))} placeholder="Selling" keyboardType="decimal-pad" placeholderTextColor={theme.subtext} style={[styles.input, { color: theme.text, backgroundColor: theme.steel }]} />
-              </View>
-            </View>
-            <Text style={[styles.small, styles.fieldLabel, { color: theme.subtext }]}>Item Images</Text>
-            <View style={styles.rowBetween}>
-              <Pressable style={[styles.itemImageUploadBtn, { backgroundColor: theme.steel }]} onPress={pickItemImages}>
-                <Text style={[styles.itemImageUploadBtnText, { color: theme.text }]}>Upload Images</Text>
-              </Pressable>
-              <Text style={[styles.small, { color: theme.subtext }]}>{selectedImageCount}/5 selected</Text>
-            </View>
-            <Text style={[styles.small, { color: theme.subtext }]}>Or add image URL (up to 5)</Text>
-            {(Array.isArray(itemImageUrls) ? itemImageUrls : ['']).map((urlValue: string, index: number) => {
-              const hasValue = String(urlValue || '').trim().length > 0;
-              const isLast = index === (Array.isArray(itemImageUrls) ? itemImageUrls.length : 1) - 1;
-              const canAdd = hasValue && isLast && selectedImageCount < 5 && (Array.isArray(itemImageUrls) ? itemImageUrls.length : 1) < 5;
-              const canRemove = (Array.isArray(itemImageUrls) ? itemImageUrls.length : 1) > 1;
-              return (
-                <View key={`item_url_${index}`} style={styles.itemUrlRow}>
-                  <TextInput
-                    value={urlValue}
-                    onChangeText={value => setItemImageUrlValue(index, value)}
-                    placeholder={`Image URL ${index + 1}`}
-                    placeholderTextColor={theme.subtext}
-                    style={[styles.input, styles.itemUrlInput, { color: theme.text, backgroundColor: theme.steel }]}
-                    autoCapitalize="none"
-                    autoCorrect={false}
-                  />
-                  {canAdd ? (
-                    <Pressable style={[styles.itemUrlActionBtn, { backgroundColor: theme.steel }]} onPress={addItemImageUrlField}>
-                      <Text style={[styles.itemUrlActionBtnText, { color: theme.text }]}>Add</Text>
-                    </Pressable>
-                  ) : null}
-                  {canRemove ? (
-                    <Pressable style={styles.itemUrlRemoveBtn} onPress={() => removeItemImageUrlField(index)}>
-                      <Text style={styles.itemUrlRemoveBtnText}>Remove</Text>
-                    </Pressable>
-                  ) : null}
-                </View>
-              );
-            })}
-            {previewEntries.length > 0 ? (
-              <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.itemImagePreviewRow}>
-                {previewEntries.map((entry: any) => (
-                  <View key={entry.id} style={[styles.itemImagePreviewCard, { backgroundColor: theme.steel }]}>
-                    <Image source={{ uri: entry.uri }} style={styles.itemImagePreviewImage} />
-                    <Pressable style={styles.itemImageRemoveBtn} onPress={entry.onRemove}>
-                      <Text style={styles.itemImageRemoveBtnText}>Remove</Text>
-                    </Pressable>
-                  </View>
-                ))}
-              </ScrollView>
-            ) : (
-              <Text style={[styles.small, { color: theme.subtext }]}>No images selected</Text>
-            )}
-            <Pressable style={[styles.primaryBtn, canEdit ? styles.orderSubmitBtn : styles.orderSubmitBtnDisabled]} onPress={createItem}>
-              <Text style={[styles.primaryText, canEdit ? styles.orderSubmitBtnText : styles.orderSubmitBtnTextDisabled]}>
-                {isSaving ? 'Saving...' : 'Create Item'}
+          <View style={styles.row}>
+            <Pressable
+              style={[
+                styles.adminNavChip,
+                styles.navSliderChip,
+                isDarkMode
+                  ? itemsView === 'form'
+                    ? styles.adminNavChipDarkActive
+                    : styles.adminNavChipDark
+                  : itemsView === 'form'
+                    ? styles.adminNavChipLightActive
+                    : styles.adminNavChipLight,
+              ]}
+              onPress={() => setItemsView('form')}
+            >
+              <Text
+                style={[
+                  styles.adminNavChipText,
+                  itemsView === 'form'
+                    ? isDarkMode
+                      ? styles.adminNavChipTextDarkActive
+                      : styles.adminNavChipTextLightActive
+                    : { color: theme.text },
+                ]}
+              >
+                Item Form
+              </Text>
+            </Pressable>
+            <Pressable
+              style={[
+                styles.adminNavChip,
+                styles.navSliderChip,
+                isDarkMode
+                  ? itemsView === 'inventory'
+                    ? styles.adminNavChipDarkActive
+                    : styles.adminNavChipDark
+                  : itemsView === 'inventory'
+                    ? styles.adminNavChipLightActive
+                    : styles.adminNavChipLight,
+              ]}
+              onPress={() => setItemsView('inventory')}
+            >
+              <Text
+                style={[
+                  styles.adminNavChipText,
+                  itemsView === 'inventory'
+                    ? isDarkMode
+                      ? styles.adminNavChipTextDarkActive
+                      : styles.adminNavChipTextLightActive
+                    : { color: theme.text },
+                ]}
+              >
+                Inventory
               </Text>
             </Pressable>
           </View>
 
-          <Text style={[styles.small, styles.fieldLabel, { color: theme.subtext }]}>Search Items</Text>
-          <TextInput value={search} onChangeText={setSearch} placeholder="Search items" placeholderTextColor={theme.subtext} style={[styles.input, { color: theme.text, backgroundColor: theme.panelSoft }]} />
-          {filteredItems.map((item: any) => {
-            const statusColor = item.status === 'In Stock' ? theme.accent : item.status === 'Low Stock' ? theme.warning : theme.danger;
-            const itemSummary = [item.brand || '—', item.category, item.technologyOption, item.capacityAh, `Qty ${item.qty}`]
-              .filter(Boolean)
-              .join(' • ');
-            return (
-              <View key={item.id} style={[styles.rowCard, { backgroundColor: theme.panelSoft }]}>
-                <View style={{ flex: 1 }}>
-                  <Text style={[styles.itemText, { color: theme.text }]}>{`${item.name} (${item.sku})`}</Text>
-                  <Text style={[styles.small, { color: theme.subtext }]}>{itemSummary}</Text>
-                </View>
-                <Text style={[styles.itemText, { color: statusColor }]}>{item.status}</Text>
-                <Pressable
-                  style={styles.itemEditIconBtn}
-                  onPress={() => openItemEditModal(item.id)}
-                  disabled={!canEdit}
-                >
-                  <Text style={[styles.itemEditIconText, !canEdit && styles.itemEditIconTextDisabled]}>✎</Text>
-                </Pressable>
+          {itemsView === 'form' ? (
+            <View style={[styles.form, { backgroundColor: theme.panelSoft }]}> 
+              <Text style={[styles.small, styles.fieldLabel, { color: theme.subtext }]}>Item Name</Text>
+              <TextInput value={itemName} onChangeText={setItemName} placeholder="Item Name*" placeholderTextColor={theme.subtext} style={[styles.input, { color: theme.text, backgroundColor: theme.steel }]} />
+              <Text style={[styles.small, styles.fieldLabel, { color: theme.subtext }]}>HSN/SAC</Text>
+              <TextInput value={itemSku} onChangeText={setItemSku} placeholder="HSN/SAC*" placeholderTextColor={theme.subtext} style={[styles.input, { color: theme.text, backgroundColor: theme.steel }]} />
+              <Text style={[styles.small, styles.fieldLabel, { color: theme.subtext }]}>Brand</Text>
+              <View style={styles.brandInputWrap}>
+                <TextInput
+                  value={itemBrand}
+                  onChangeText={value => handleBrandInputChange('create', value)}
+                  onFocus={() => showBrandDropdown('create')}
+                  onPressIn={() => showBrandDropdown('create')}
+                  onBlur={() => scheduleCloseBrandDropdown('create')}
+                  placeholder="Brand"
+                  placeholderTextColor={theme.subtext}
+                  style={[styles.input, { color: theme.text, backgroundColor: theme.steel }]}
+                />
+                {isCreateBrandDropdownVisible ? (
+                  <ScrollView
+                    style={[styles.brandDropdown, { backgroundColor: theme.panel, borderColor: theme.steel }]}
+                    nestedScrollEnabled
+                    keyboardShouldPersistTaps="always"
+                    showsVerticalScrollIndicator
+                  >
+                    {(filteredBrandOptions.length > 0 ? filteredBrandOptions : brandOptions).map(brand => (
+                      <Pressable
+                        key={`brand_${brand.toLowerCase().replace(/[^a-z0-9]+/g, '_')}`}
+                        style={styles.brandDropdownItem}
+                        onPressIn={clearBrandDropdownCloseTimer}
+                        onPress={() => handleBrandSelect('create', brand)}
+                      >
+                        <Text style={[styles.brandDropdownText, { color: theme.text }]}>{brand}</Text>
+                      </Pressable>
+                    ))}
+                    <View style={[styles.brandDropdownDivider, { backgroundColor: theme.steel }]} />
+                    <Pressable
+                      style={[styles.brandDropdownItem, styles.brandDropdownItemLast]}
+                      onPressIn={clearBrandDropdownCloseTimer}
+                      onPress={() => enableManualBrandEntry('create')}
+                    >
+                      <Text style={styles.brandDropdownManualText}>+ Manual Entry</Text>
+                    </Pressable>
+                  </ScrollView>
+                ) : null}
               </View>
-            );
-          })}
+              <Picker
+                label="Category"
+                selectedId={itemCategory}
+                options={categoryOptions}
+                onSelect={setItemCategory}
+                theme={theme}
+              />
+              <Picker
+                label="Technology (Optional)"
+                selectedId={itemTechnologyOption}
+                options={technologyOptions}
+                onSelect={setItemTechnologyOption}
+                theme={theme}
+                allowDeselect
+              />
+              <Picker
+                label="Capacity (Ah) (Optional)"
+                selectedId={capacityInputMode === 'manual' ? MANUAL_CAPACITY_OPTION_ID : itemCapacityAh || NO_CAPACITY_OPTION_ID}
+                options={capacityOptions}
+                onSelect={handleCapacitySelect}
+                theme={theme}
+              />
+              {capacityInputMode === 'manual' ? (
+                <>
+                  <Text style={[styles.small, styles.fieldLabel, { color: theme.subtext }]}>Manual Capacity (Ah) (Optional)</Text>
+                  <TextInput
+                    value={manualCapacityValue}
+                    onChangeText={handleManualCapacityChange}
+                    placeholder="e.g. 135"
+                    keyboardType="numeric"
+                    placeholderTextColor={theme.subtext}
+                    style={[styles.input, { color: theme.text, backgroundColor: theme.steel }]}
+                  />
+                </>
+              ) : null}
+              <Text style={[styles.small, styles.fieldLabel, { color: theme.subtext }]}>Tags (Optional)</Text>
+              <View style={styles.itemTagRow}>
+                {itemTagOptions.map(tag => {
+                  const active = selectedItemTags.includes(tag.id);
+                  return (
+                    <Pressable
+                      key={tag.id}
+                      style={[
+                        styles.itemTagChip,
+                        { backgroundColor: active ? theme.primary : theme.steel, borderColor: active ? theme.primary : '#CBD5E1' },
+                      ]}
+                      onPress={() => toggleItemTag(tag.id)}
+                    >
+                      <Text style={[styles.itemTagChipText, { color: active ? '#FFFFFF' : theme.text }]}>{tag.label}</Text>
+                    </Pressable>
+                  );
+                })}
+              </View>
+              <View style={styles.row}>
+                <View style={styles.half}>
+                  <Text style={[styles.small, styles.fieldLabel, { color: theme.subtext }]}>Quantity</Text>
+                  <TextInput value={itemQty} onChangeText={v => setItemQty(v.replace(/[^0-9]/g, ''))} placeholder="Qty" keyboardType="numeric" placeholderTextColor={theme.subtext} style={[styles.input, { color: theme.text, backgroundColor: theme.steel }]} />
+                </View>
+                <View style={styles.half}>
+                  <Text style={[styles.small, styles.fieldLabel, { color: theme.subtext }]}>Reorder Level</Text>
+                  <TextInput value={itemReorder} onChangeText={v => setItemReorder(v.replace(/[^0-9]/g, ''))} placeholder="Reorder" keyboardType="numeric" placeholderTextColor={theme.subtext} style={[styles.input, { color: theme.text, backgroundColor: theme.steel }]} />
+                </View>
+              </View>
+              <View style={styles.row}>
+                <View style={styles.half}>
+                  <Text style={[styles.small, styles.fieldLabel, { color: theme.subtext }]}>Purchase Price</Text>
+                  <TextInput value={itemPurchasePrice} onChangeText={v => setItemPurchasePrice(v.replace(/[^0-9.]/g, ''))} placeholder="Purchase" keyboardType="decimal-pad" placeholderTextColor={theme.subtext} style={[styles.input, { color: theme.text, backgroundColor: theme.steel }]} />
+                </View>
+                <View style={styles.half}>
+                  <Text style={[styles.small, styles.fieldLabel, { color: theme.subtext }]}>Selling Price</Text>
+                  <TextInput value={itemSellingPrice} onChangeText={v => setItemSellingPrice(v.replace(/[^0-9.]/g, ''))} placeholder="Selling" keyboardType="decimal-pad" placeholderTextColor={theme.subtext} style={[styles.input, { color: theme.text, backgroundColor: theme.steel }]} />
+                </View>
+              </View>
+              <Text style={[styles.small, styles.fieldLabel, { color: theme.subtext }]}>Item Images</Text>
+              <View style={styles.rowBetween}>
+                <Pressable style={[styles.itemImageUploadBtn, { backgroundColor: theme.steel }]} onPress={pickItemImages}>
+                  <Text style={[styles.itemImageUploadBtnText, { color: theme.text }]}>Upload Images</Text>
+                </Pressable>
+                <Text style={[styles.small, { color: theme.subtext }]}>{selectedImageCount}/5 selected</Text>
+              </View>
+              <Text style={[styles.small, { color: theme.subtext }]}>Or add image URL (up to 5)</Text>
+              {(Array.isArray(itemImageUrls) ? itemImageUrls : ['']).map((urlValue: string, index: number) => {
+                const hasValue = String(urlValue || '').trim().length > 0;
+                const isLast = index === (Array.isArray(itemImageUrls) ? itemImageUrls.length : 1) - 1;
+                const canAdd = hasValue && isLast && selectedImageCount < 5 && (Array.isArray(itemImageUrls) ? itemImageUrls.length : 1) < 5;
+                const canRemove = (Array.isArray(itemImageUrls) ? itemImageUrls.length : 1) > 1;
+                return (
+                  <View key={`item_url_${index}`} style={styles.itemUrlRow}>
+                    <TextInput
+                      value={urlValue}
+                      onChangeText={value => setItemImageUrlValue(index, value)}
+                      placeholder={`Image URL ${index + 1}`}
+                      placeholderTextColor={theme.subtext}
+                      style={[styles.input, styles.itemUrlInput, { color: theme.text, backgroundColor: theme.steel }]}
+                      autoCapitalize="none"
+                      autoCorrect={false}
+                    />
+                    {canAdd ? (
+                      <Pressable style={[styles.itemUrlActionBtn, { backgroundColor: theme.steel }]} onPress={addItemImageUrlField}>
+                        <Text style={[styles.itemUrlActionBtnText, { color: theme.text }]}>Add</Text>
+                      </Pressable>
+                    ) : null}
+                    {canRemove ? (
+                      <Pressable style={styles.itemUrlRemoveBtn} onPress={() => removeItemImageUrlField(index)}>
+                        <Text style={styles.itemUrlRemoveBtnText}>Remove</Text>
+                      </Pressable>
+                    ) : null}
+                  </View>
+                );
+              })}
+              {previewEntries.length > 0 ? (
+                <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.itemImagePreviewRow}>
+                  {previewEntries.map((entry: any) => (
+                    <View key={entry.id} style={[styles.itemImagePreviewCard, { backgroundColor: theme.steel }]}>
+                      <Image source={{ uri: entry.uri }} style={styles.itemImagePreviewImage} />
+                      <Pressable style={styles.itemImageRemoveBtn} onPress={entry.onRemove}>
+                        <Text style={styles.itemImageRemoveBtnText}>Remove</Text>
+                      </Pressable>
+                    </View>
+                  ))}
+                </ScrollView>
+              ) : (
+                <Text style={[styles.small, { color: theme.subtext }]}>No images selected</Text>
+              )}
+              <Pressable style={[styles.primaryBtn, canEdit ? styles.orderSubmitBtn : styles.orderSubmitBtnDisabled]} onPress={createItem}>
+                <Text style={[styles.primaryText, canEdit ? styles.orderSubmitBtnText : styles.orderSubmitBtnTextDisabled]}>
+                  {isSaving ? 'Saving...' : 'Create Item'}
+                </Text>
+              </Pressable>
+            </View>
+          ) : (
+            <View style={[styles.form, { backgroundColor: theme.panelSoft }]}>
+              <Text style={[styles.small, styles.fieldLabel, { color: theme.subtext }]}>Search Items</Text>
+              <TextInput
+                value={search}
+                onChangeText={setSearch}
+                placeholder="Search inventory"
+                placeholderTextColor={theme.subtext}
+                style={[styles.input, { color: theme.text, backgroundColor: theme.panel }]}
+              />
+              <Text style={[styles.small, { color: theme.subtext }]}>
+                {filteredItems.length} inventory item{filteredItems.length === 1 ? '' : 's'}
+              </Text>
+              {filteredItems.length === 0 ? (
+                <Text style={[styles.small, { color: theme.subtext }]}>No items found.</Text>
+              ) : (
+                filteredItems.map((item: any) => {
+                  const statusColor = item.status === 'In Stock' ? theme.accent : item.status === 'Low Stock' ? theme.warning : theme.danger;
+                  const itemSummary = [item.brand || '—', item.category, item.technologyOption, item.capacityAh, `Qty ${item.qty}`]
+                    .filter(Boolean)
+                    .join(' • ');
+                  return (
+                    <View key={item.id} style={[styles.rowCard, { backgroundColor: theme.panel }]}>
+                      <View style={{ flex: 1 }}>
+                        <Text style={[styles.itemText, { color: theme.text }]}>{`${item.name} (${item.sku})`}</Text>
+                        <Text style={[styles.small, { color: theme.subtext }]}>{itemSummary}</Text>
+                      </View>
+                      <Text style={[styles.itemText, { color: statusColor }]}>{item.status}</Text>
+                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                        <Pressable
+                          style={styles.itemEditIconBtn}
+                          onPress={() => openItemEditModal(item.id)}
+                          disabled={!canEdit || isSaving}
+                        >
+                          <Text style={[styles.itemEditIconText, (!canEdit || isSaving) && styles.itemEditIconTextDisabled]}>✎</Text>
+                        </Pressable>
+                        <Pressable
+                          style={[styles.chip, { backgroundColor: canEdit ? '#B85C5C' : theme.steel, opacity: isSaving ? 0.72 : 1 }]}
+                          onPress={() => deleteItem(item.id)}
+                          disabled={!canEdit || isSaving}
+                        >
+                          <Text style={[styles.chipText, { color: canEdit ? '#FEE2E2' : theme.subtext }]}>Delete</Text>
+                        </Pressable>
+                      </View>
+                    </View>
+                  );
+                })
+              )}
+            </View>
+          )}
           <Modal
             visible={isItemEditModalVisible}
             animationType="fade"
@@ -623,12 +711,12 @@ function AdminModuleContent(props: Props) {
                   />
                   <Picker
                     label="Capacity (Ah) (Optional)"
-                    selectedId={isManualCapacityMode ? MANUAL_CAPACITY_OPTION_ID : itemCapacityAh || NO_CAPACITY_OPTION_ID}
+                    selectedId={capacityInputMode === 'manual' ? MANUAL_CAPACITY_OPTION_ID : itemCapacityAh || NO_CAPACITY_OPTION_ID}
                     options={capacityOptions}
                     onSelect={handleCapacitySelect}
                     theme={theme}
                   />
-                  {isManualCapacityMode ? (
+                  {capacityInputMode === 'manual' ? (
                     <>
                       <Text style={[styles.small, styles.fieldLabel, { color: theme.subtext }]}>Manual Capacity (Ah) (Optional)</Text>
                       <TextInput

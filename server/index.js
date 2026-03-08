@@ -4515,6 +4515,62 @@ async function getAuth(req) {
   return { token, ...session };
 }
 
+function toAdminHealthDatabaseMessage(err) {
+  const code = compactText(err && typeof err === 'object' ? err.code : '');
+  if (code) {
+    return `Database ping failed (${code})`;
+  }
+  return 'Database ping failed';
+}
+
+async function runAdminApiHealthCheck(authUser) {
+  const checkedAt = new Date().toISOString();
+  const databaseStartedAt = Date.now();
+  let database = {
+    status: 'ok',
+    latencyMs: null,
+    message: 'Database connection is healthy.',
+  };
+
+  try {
+    const conn = await mysqlPool.getConnection();
+    try {
+      await conn.query('SELECT 1 AS ok');
+    } finally {
+      conn.release();
+    }
+    database = {
+      status: 'ok',
+      latencyMs: Math.max(0, Date.now() - databaseStartedAt),
+      message: 'Database connection is healthy.',
+    };
+  } catch (err) {
+    database = {
+      status: 'error',
+      latencyMs: Math.max(0, Date.now() - databaseStartedAt),
+      message: toAdminHealthDatabaseMessage(err),
+    };
+  }
+
+  return {
+    status: database.status === 'ok' ? 'ok' : 'degraded',
+    checkedAt,
+    server: {
+      status: 'ok',
+      timestamp: checkedAt,
+      uptimeSeconds: Math.max(0, Math.floor(process.uptime())),
+      nodeVersion: process.version,
+      appName: APP_NAME,
+    },
+    database,
+    auth: {
+      userId: authUser.userId,
+      role: authUser.role,
+      username: authUser.username,
+    },
+  };
+}
+
 async function getLocationOwner(req, searchParams) {
   const auth = await getAuth(req);
   if (auth?.userId) {
@@ -6551,6 +6607,21 @@ const server = http.createServer(async (req, res) => {
       } finally {
         conn.release();
       }
+      return;
+    }
+
+    if (pathname === '/api/public/storefront/admin/api-health' && req.method === 'GET') {
+      const authUser = await getAuth(req);
+      if (!authUser?.userId) {
+        sendError(res, 401, 'Login required for API health check');
+        return;
+      }
+      if (authUser.role !== 'admin') {
+        sendError(res, 403, 'Only admin can run API health check');
+        return;
+      }
+      const health = await runAdminApiHealthCheck(authUser);
+      sendJson(res, 200, { health });
       return;
     }
 

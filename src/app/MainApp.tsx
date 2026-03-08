@@ -12,6 +12,7 @@ import {
   PermissionsAndroid,
   Platform,
   Pressable,
+  RefreshControl,
   SafeAreaView,
   ScrollView,
   StatusBar,
@@ -54,6 +55,7 @@ import {
 } from './appUpdateInstaller';
 import styles from './styles';
 import type {
+  AdminApiHealthStatus,
   AuthMode,
   CartItem,
   DeliveryLocation,
@@ -251,6 +253,64 @@ function toFeatureChipLabel(value: string) {
   return normalized.toLowerCase().replace(/\b[a-z]/g, match => match.toUpperCase());
 }
 
+function normalizeSearchTerm(value: unknown) {
+  return String(value || '').toLowerCase().trim();
+}
+
+function escapeForRegExp(value: string) {
+  return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function sanitizeUserFacingErrorMessage(value: unknown, fallback = 'Something went wrong. Please try again.') {
+  const raw = String(value || '').trim();
+  if (!raw) {
+    return fallback;
+  }
+
+  const normalized = raw
+    .replace(/\[\s*(?:https?|wss?):\/\/[^\]]+\s*\]/gi, '')
+    .replace(/\b(?:https?|wss?):\/\/[^\s)]+/gi, '')
+    .replace(new RegExp(escapeForRegExp(String(API_BASE || '')), 'gi'), '')
+    .replace(/\s{2,}/g, ' ')
+    .replace(/^[\s,;:()[\]-]+/, '')
+    .replace(/[\s,;:()[\]-]+$/, '')
+    .trim();
+
+  return normalized || fallback;
+}
+
+function buildCapacityAwareSearchHaystack(parts: Array<unknown>) {
+  const normalizedParts = parts.map(normalizeSearchTerm).filter(Boolean);
+  const capacityTokens = new Set<string>();
+
+  for (const part of normalizedParts) {
+    const compact = part.replace(/\s+/g, '');
+    for (const source of [part, compact]) {
+      const matches = source.matchAll(/(\d{2,4})ah\b/g);
+      for (const match of matches) {
+        const digits = String(match[1] || '').trim();
+        if (!digits) continue;
+        capacityTokens.add(digits);
+        capacityTokens.add(`${digits}ah`);
+      }
+    }
+  }
+
+  return [normalizedParts.join(' '), normalizedParts.map(part => part.replace(/\s+/g, '')).join(' '), Array.from(capacityTokens).join(' ')]
+    .filter(Boolean)
+    .join(' ');
+}
+
+function matchesCapacityAwareSearch(parts: Array<unknown>, query: string) {
+  const normalizedQuery = normalizeSearchTerm(query);
+  if (!normalizedQuery) {
+    return true;
+  }
+  const compactQuery = normalizedQuery.replace(/\s+/g, '');
+  const haystack = buildCapacityAwareSearchHaystack(parts);
+  return haystack.includes(normalizedQuery) || haystack.includes(compactQuery);
+}
+
 function formatByteSize(value: number) {
   const size = Number(value || 0);
   if (!Number.isFinite(size) || size <= 0) {
@@ -270,7 +330,7 @@ function formatByteSize(value: number) {
 
 function toFetchError(url: string, err: unknown, fallback = 'Request failed') {
   const message = err instanceof Error ? err.message : fallback;
-  return new Error(`${message} [${url}]`);
+  return new Error(sanitizeUserFacingErrorMessage(message, fallback));
 }
 
 function formatCurrency(value: number) {
@@ -571,6 +631,34 @@ function PoweredByFooter({
   );
 }
 
+function formatProfileDateTime(value: string | null | undefined) {
+  const raw = String(value || '').trim();
+  if (!raw) {
+    return 'Not checked yet';
+  }
+  const parsed = new Date(raw);
+  if (Number.isNaN(parsed.getTime())) {
+    return raw;
+  }
+  return parsed.toLocaleString();
+}
+
+function formatUptimeLabel(totalSeconds: number | null | undefined) {
+  if (typeof totalSeconds !== 'number' || !Number.isFinite(totalSeconds)) {
+    return 'Unavailable';
+  }
+  const seconds = Math.max(0, Math.floor(Number(totalSeconds) || 0));
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  if (hours > 0) {
+    return `${hours}h ${minutes}m`;
+  }
+  if (minutes > 0) {
+    return `${minutes}m`;
+  }
+  return `${seconds}s`;
+}
+
 function MainApp() {
   const insets = useSafeAreaInsets();
   const { width: viewportWidth } = useWindowDimensions();
@@ -589,6 +677,7 @@ function MainApp() {
   const [moduleId, setModuleId] = useState<ModuleId>('dashboard');
   const [isLoading, setIsLoading] = useState(false);
   const [isPublicLoading, setIsPublicLoading] = useState(false);
+  const [isPageRefreshing, setIsPageRefreshing] = useState(false);
   const [isPublicDetailLoading, setIsPublicDetailLoading] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -678,6 +767,9 @@ function MainApp() {
   const [sellerBillingDraft, setSellerBillingDraft] = useState<SellerBillingSettings>(DEFAULT_SELLER_BILLING_SETTINGS);
   const [isSellerBillingLoading, setIsSellerBillingLoading] = useState(false);
   const [isSellerBillingSaving, setIsSellerBillingSaving] = useState(false);
+  const [adminApiHealth, setAdminApiHealth] = useState<AdminApiHealthStatus | null>(null);
+  const [adminApiHealthError, setAdminApiHealthError] = useState<string | null>(null);
+  const [isAdminApiHealthLoading, setIsAdminApiHealthLoading] = useState(false);
   const [heroImageFailed, setHeroImageFailed] = useState(false);
   const [suppliers, setSuppliers] = useState<Party[]>([]);
   const [customers, setCustomers] = useState<Party[]>([]);
@@ -701,7 +793,10 @@ function MainApp() {
   });
 
   const [search, setSearch] = useState('');
+  const [landingSearchQuery, setLandingSearchQuery] = useState('');
   const [publicSearch, setPublicSearch] = useState('');
+  const [categoryViewMoreSearch, setCategoryViewMoreSearch] = useState('');
+  const [isPublicSearchModalVisible, setIsPublicSearchModalVisible] = useState(false);
   const [feedbackMessage, setFeedbackMessage] = useState('');
   const [feedbackRating, setFeedbackRating] = useState(4);
   const [feedbackOrderItems, setFeedbackOrderItems] = useState<FeedbackOrderItem[]>([]);
@@ -714,6 +809,7 @@ function MainApp() {
   const [itemCategory, setItemCategory] = useState(DEFAULT_ITEM_CATEGORY);
   const [itemTechnologyOption, setItemTechnologyOption] = useState<ItemTechnologyOption | ''>(DEFAULT_ITEM_TECHNOLOGY);
   const [itemCapacityAh, setItemCapacityAh] = useState('');
+  const [itemDraftVersion, setItemDraftVersion] = useState(0);
   const [itemQty, setItemQty] = useState('1');
   const [itemReorder, setItemReorder] = useState('8');
   const [itemPurchasePrice, setItemPurchasePrice] = useState('0');
@@ -752,6 +848,7 @@ function MainApp() {
   const authFormOpacity = useRef(new Animated.Value(1)).current;
   const authFormSlide = useRef(new Animated.Value(0)).current;
   const publicScrollRef = useRef<ScrollView | null>(null);
+  const publicSearchInputRef = useRef<TextInput | null>(null);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const guestIdRef = useRef(`gst_${Math.random().toString(36).slice(2, 10)}`);
   const lastAddActionRef = useRef<{ id: string; ts: number } | null>(null);
@@ -783,7 +880,7 @@ function MainApp() {
   };
 
   const toRequestError = (status: number, message: string) => {
-    const err = new Error(message || 'Request failed') as Error & { status?: number };
+    const err = new Error(sanitizeUserFacingErrorMessage(message, 'Request failed')) as Error & { status?: number };
     err.status = status;
     return err;
   };
@@ -940,7 +1037,10 @@ function MainApp() {
     if (toastTimer.current) {
       clearTimeout(toastTimer.current);
     }
-    setToast({ message, type });
+    setToast({
+      message: type === 'error' ? sanitizeUserFacingErrorMessage(message, 'Something went wrong. Please try again.') : message,
+      type,
+    });
     toastTimer.current = setTimeout(() => {
       setToast(null);
       toastTimer.current = null;
@@ -949,7 +1049,7 @@ function MainApp() {
 
   const showActionError = (title: string, err: unknown, fallback = 'Request failed') => {
     const status = Number((err as any)?.status || 0);
-    const message = err instanceof Error ? err.message : fallback;
+    const message = sanitizeUserFacingErrorMessage(err instanceof Error ? err.message : fallback, fallback);
     if (status >= 500) {
       Alert.alert(title, 'Server error occurred. Please try again.');
       setError(message);
@@ -1176,12 +1276,24 @@ function MainApp() {
   };
 
   const openViewMoreModal = (context: ViewMoreContext) => {
+    if (context === 'category') {
+      setCategoryViewMoreSearch('');
+    }
     setViewMoreContext(context);
     setIsViewMoreModalVisible(true);
   };
 
   const closeViewMoreModal = () => {
+    setCategoryViewMoreSearch('');
     setIsViewMoreModalVisible(false);
+  };
+
+  const openPublicSearchModal = () => {
+    setIsPublicSearchModalVisible(true);
+  };
+
+  const closePublicSearchModal = () => {
+    setIsPublicSearchModalVisible(false);
   };
 
   const closeProfileModal = () => {
@@ -1277,12 +1389,21 @@ function MainApp() {
   };
 
   const openProfilePanel = (panel: ProfilePanel) => {
-    if (panel === 'seller') {
+    if (panel === 'seller' || panel === 'apiHealth') {
       if (!token || user?.role !== 'admin') {
-        Alert.alert('Admin Only', 'Seller billing settings are available only for admin login.');
+        Alert.alert(
+          'Admin Only',
+          panel === 'seller'
+            ? 'Seller billing settings are available only for admin login.'
+            : 'API health check is available only for admin login.',
+        );
         return;
       }
-      void loadSellerBillingSettings();
+      if (panel === 'seller') {
+        void loadSellerBillingSettings();
+      } else {
+        void loadAdminApiHealth();
+      }
     }
     setActiveProfilePanel(panel);
   };
@@ -1313,6 +1434,72 @@ function MainApp() {
       showToast(err instanceof Error ? err.message : 'Failed to load seller billing settings', 'error');
     } finally {
       setIsSellerBillingLoading(false);
+    }
+  };
+
+  const loadAdminApiHealthFromFallback = async (): Promise<AdminApiHealthStatus> => {
+    const checkedAt = new Date().toISOString();
+    const serverHealth = await apiRequest<{ status?: string; timestamp?: string }>('/health', { skipAuth: true });
+    const databaseStartedAt = Date.now();
+    await storefrontApiRequest<{ settings?: SellerBillingSettings }>(
+      '/api/public/storefront/admin/seller-settings',
+    );
+
+    return {
+      status: 'ok',
+      checkedAt,
+      server: {
+        status: 'ok',
+        timestamp: String(serverHealth.timestamp || checkedAt),
+        uptimeSeconds: null,
+        nodeVersion: 'Unavailable (fallback mode)',
+        appName: 'FuElectric',
+      },
+      database: {
+        status: 'ok',
+        latencyMs: Math.max(0, Date.now() - databaseStartedAt),
+        message: 'Database access verified via the admin seller settings endpoint.',
+      },
+      auth: {
+        userId: String(user?.id || ''),
+        role: 'admin',
+        username: String(user?.username || ''),
+      },
+    };
+  };
+
+  const loadAdminApiHealth = async (showFailureAlert = false) => {
+    if (!token || user?.role !== 'admin') {
+      return;
+    }
+    try {
+      setIsAdminApiHealthLoading(true);
+      setAdminApiHealthError(null);
+      let json: { health?: AdminApiHealthStatus };
+      try {
+        json = await storefrontApiRequest<{ health?: AdminApiHealthStatus }>(
+          '/api/public/storefront/admin/api-health',
+        );
+      } catch (err) {
+        if (Number((err as any)?.status || 0) === 404) {
+          const fallbackHealth = await loadAdminApiHealthFromFallback();
+          setAdminApiHealth(fallbackHealth);
+          return;
+        }
+        throw err;
+      }
+      if (!json.health) {
+        throw new Error('API health check data is unavailable');
+      }
+      setAdminApiHealth(json.health);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Unable to run API health check';
+      setAdminApiHealthError(message);
+      if (showFailureAlert) {
+        showActionError('API Health Check Failed', err, 'Unable to run API health check');
+      }
+    } finally {
+      setIsAdminApiHealthLoading(false);
     }
   };
 
@@ -2467,9 +2654,9 @@ function MainApp() {
       setInvoices(invRes.invoices);
       setMovements(movRes.movements);
 
-      if (!selectedItemId && itemsRes.items[0]) {
-        setSelectedItemId(itemsRes.items[0].id);
-      }
+      setSelectedItemId(prev =>
+        itemsRes.items.some(item => item.id === prev) ? prev : itemsRes.items[0]?.id || '',
+      );
       if (!selectedSupplierId && supRes.suppliers[0]) {
         setSelectedSupplierId(supRes.suppliers[0].id);
       }
@@ -2480,6 +2667,29 @@ function MainApp() {
       setError(err instanceof Error ? err.message : 'Failed to load data');
     } finally {
       setIsLoading(false);
+    }
+  };
+
+  const refreshCurrentPage = async () => {
+    if (isPageRefreshing) {
+      return;
+    }
+
+    try {
+      setIsPageRefreshing(true);
+      if (isAdminUser) {
+        await loadAll();
+        return;
+      }
+
+      await Promise.all([
+        loadPublicStock(),
+        loadStorefrontState(),
+        loadLocationProfile(),
+        ...(publicView === 'feedback' ? [loadFeedbackOrderItems()] : []),
+      ]);
+    } finally {
+      setIsPageRefreshing(false);
     }
   };
 
@@ -2608,6 +2818,16 @@ function MainApp() {
   }, [isViewMoreModalVisible, viewMoreOpacity, viewMoreRise]);
 
   useEffect(() => {
+    if (!isPublicSearchModalVisible) {
+      return;
+    }
+    const timer = setTimeout(() => {
+      publicSearchInputRef.current?.focus();
+    }, 60);
+    return () => clearTimeout(timer);
+  }, [isPublicSearchModalVisible]);
+
+  useEffect(() => {
     loadPublicStock();
     loadLocationProfile();
   }, [token]);
@@ -2634,6 +2854,14 @@ function MainApp() {
       setError(null);
     }
   }, [token, user]);
+  useEffect(() => {
+    if (isAdminUser) {
+      return;
+    }
+    setAdminApiHealth(null);
+    setAdminApiHealthError(null);
+    setIsAdminApiHealthLoading(false);
+  }, [isAdminUser]);
   useEffect(() => {
     if (!user) return;
     setProfileName(user.name || 'Piyush Sharma');
@@ -2900,6 +3128,7 @@ function MainApp() {
     setItemTags([]);
     setItemImages([]);
     setItemImageUrls(['']);
+    setItemDraftVersion(prev => prev + 1);
   };
 
   const startItemEdit = (itemId: string) => {
@@ -2925,6 +3154,7 @@ function MainApp() {
       ? target.images.map(url => String(url || '').trim()).filter(isAllowedItemImageUrl)
       : [];
     setItemImageUrls(existingUrls.length > 0 ? existingUrls.slice(0, MAX_ITEM_IMAGES) : ['']);
+    setItemDraftVersion(prev => prev + 1);
     return true;
   };
 
@@ -3057,6 +3287,41 @@ function MainApp() {
     }
   };
 
+  const deleteItem = (itemId: string) => {
+    if (!canEdit) {
+      Alert.alert('Permission', 'Your role cannot delete items.');
+      return;
+    }
+    const target = items.find(item => item.id === itemId);
+    if (!target) {
+      Alert.alert('Not Found', 'Item could not be loaded for deletion.');
+      return;
+    }
+
+    Alert.alert('Delete Item', `Delete "${target.name}" from inventory?`, [
+      { text: 'Cancel', style: 'cancel' },
+      {
+        text: 'Delete',
+        style: 'destructive',
+        onPress: async () => {
+          try {
+            setIsSaving(true);
+            await apiRequest(`/api/items/${itemId}`, { method: 'DELETE' });
+            if (editingItemId === itemId) {
+              closeItemEditModal();
+            }
+            showToast('Item deleted');
+            await loadAll();
+          } catch (err) {
+            showActionError('Delete Item Failed', err, 'Failed to delete item');
+          } finally {
+            setIsSaving(false);
+          }
+        },
+      },
+    ]);
+  };
+
   const createDocument = async (type: 'purchase-orders' | 'sales-orders' | 'bills' | 'invoices') => {
     if (!canEdit) {
       Alert.alert('Permission', 'Your role cannot create documents.');
@@ -3156,14 +3421,6 @@ function MainApp() {
     }
   };
 
-  const filteredItems = useMemo(() => {
-    const q = search.toLowerCase().trim();
-    return items.filter(
-      item =>
-        !q ||
-        `${item.name} ${item.sku} ${item.category} ${item.brand} ${item.technologyOption || ''}`.toLowerCase().includes(q),
-    );
-  }, [items, search]);
   const featuredPublic = useMemo(() => publicStock.slice(0, 2), [publicStock]);
   const inverterProducts = useMemo(
     () =>
@@ -3200,8 +3457,46 @@ function MainApp() {
     }
     return accessoryProducts;
   }, [landingCategory, inverterProducts, batteryProducts, accessoryProducts]);
-  const searchedLandingProducts = useMemo(() => {
-    const q = publicSearch.trim().toLowerCase();
+  const filteredItems = useMemo(() => {
+    return items.filter(item =>
+      matchesCapacityAwareSearch(
+        [
+          item.name,
+          item.sku,
+          item.category,
+          item.brand,
+          item.model || '',
+          item.capacityAh || '',
+          item.technologyOption || '',
+          Array.isArray(item.tags) ? item.tags.join(' ') : '',
+        ],
+        search,
+      ),
+    );
+  }, [items, search]);
+  const landingSearchResults = useMemo(() => {
+    if (!landingSearchQuery.trim()) {
+      return [];
+    }
+    return publicProducts.filter(product =>
+      matchesCapacityAwareSearch(
+        [
+          product.name,
+          product.model,
+          product.brand,
+          product.category,
+          product.technologyOption || '',
+          product.shortDescription,
+          getLandingProductTitle(product),
+          getLandingProductModel(product),
+          Array.isArray(product.tags) ? product.tags.join(' ') : '',
+        ],
+        landingSearchQuery,
+      ),
+    );
+  }, [landingSearchQuery, publicProducts]);
+  const searchedCategoryViewMoreProducts = useMemo(() => {
+    const q = categoryViewMoreSearch.trim().toLowerCase();
     if (!q) {
       return landingProducts;
     }
@@ -3210,7 +3505,7 @@ function MainApp() {
         .toLowerCase()
         .includes(q),
     );
-  }, [landingProducts, publicSearch]);
+  }, [landingProducts, categoryViewMoreSearch]);
   const searchedPublicProducts = useMemo(() => {
     const q = publicSearch.trim().toLowerCase();
     if (!q) {
@@ -3226,15 +3521,17 @@ function MainApp() {
     const featured = searchedPublicProducts.filter(product => Boolean(getOfferLabel(product)));
     return featured.length > 0 ? featured : searchedPublicProducts.slice(0, 10);
   }, [searchedPublicProducts]);
+  const landingSectionProducts = useMemo(() => landingProducts, [landingProducts]);
+  const featuredSectionProducts = useMemo(() => publicProducts.slice(0, 4), [publicProducts]);
   const viewMoreProducts = useMemo(() => {
     if (viewMoreContext === 'category') {
-      return searchedLandingProducts;
+      return searchedCategoryViewMoreProducts;
     }
     if (viewMoreContext === 'featured') {
       return featuredLandingProducts;
     }
     return searchedPublicProducts;
-  }, [viewMoreContext, searchedLandingProducts, featuredLandingProducts, searchedPublicProducts]);
+  }, [viewMoreContext, searchedCategoryViewMoreProducts, featuredLandingProducts, searchedPublicProducts]);
   const viewMoreTitle = useMemo(() => {
     if (viewMoreContext === 'category') {
       if (landingCategory === 'inverters') return 'Inverter Products';
@@ -3400,6 +3697,7 @@ function MainApp() {
     if (activeProfilePanel === 'warranty') return 'Warranty Claims';
     if (activeProfilePanel === 'language') return 'Language';
     if (activeProfilePanel === 'seller') return 'Seller Billing';
+    if (activeProfilePanel === 'apiHealth') return 'API Health Check';
     return 'Profile';
   }, [activeProfilePanel]);
   const cartSummary = useMemo(() => {
@@ -3530,6 +3828,17 @@ function MainApp() {
           removeClippedSubviews={false}
           keyboardShouldPersistTaps="always"
           stickyHeaderIndices={landingSearchStickyHeaderIndices}
+          refreshControl={
+            <RefreshControl
+              refreshing={isPageRefreshing}
+              onRefresh={() => {
+                void refreshCurrentPage();
+              }}
+              tintColor={theme.primary}
+              colors={[theme.primary]}
+              progressBackgroundColor={theme.panel}
+            />
+          }
           contentContainerStyle={{
             paddingTop: Math.max(10, insets.top),
             paddingHorizontal: horizontalScreenPadding,
@@ -3624,13 +3933,37 @@ function MainApp() {
           ) : null}
           {publicView !== 'feedback' && publicView !== 'categories' && publicView !== 'categoryProducts' ? (
             <View style={[styles.stickySearchWrap, { backgroundColor: theme.panel }]}>
-              <TextInput
-                value={publicSearch}
-                onChangeText={setPublicSearch}
-                placeholder="Search Inverters, Batteries..."
-                placeholderTextColor={theme.subtext}
-                style={[styles.searchInput, { color: theme.text, backgroundColor: theme.panelSoft }]}
-              />
+              <Pressable
+                onPress={openPublicSearchModal}
+                style={[
+                  styles.searchInput,
+                  {
+                    backgroundColor: theme.panelSoft,
+                    flexDirection: 'row',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    gap: 10,
+                  },
+                ]}
+              >
+                <Text
+                  style={[
+                    styles.small,
+                    {
+                      color: landingSearchQuery.trim().length > 0 ? theme.text : theme.subtext,
+                      flex: 1,
+                      fontSize: 13,
+                      fontWeight: '700',
+                    },
+                ]}
+                  numberOfLines={1}
+                >
+                  {landingSearchQuery.trim().length > 0
+                    ? landingSearchQuery.trim()
+                    : 'Search Inverters, Batteries, Miscellaneous...'}
+                </Text>
+                <Text style={[styles.small, { color: theme.subtext, fontSize: 14 }]}>⌕</Text>
+              </Pressable>
             </View>
           ) : null}
 
@@ -3690,10 +4023,11 @@ function MainApp() {
               categoryCards={categoryCards}
               landingCategory={landingCategory}
               setLandingCategory={setLandingCategory}
-              searchedLandingProducts={searchedLandingProducts}
+              landingSectionProducts={landingSectionProducts}
               cartQtyByProductId={cartQtyByProductId}
               openProductDetail={openProductDetail}
               publicProducts={publicProducts}
+              featuredSectionProducts={featuredSectionProducts}
               searchedPublicProducts={searchedPublicProducts}
               isPublicLoading={isPublicLoading}
               cartItems={cartItems}
@@ -3716,6 +4050,96 @@ function MainApp() {
             isCheckoutSheetVisible={isCheckoutSheetVisible}
           />
         ) : null}
+        <Modal
+          visible={isPublicSearchModalVisible}
+          animationType="fade"
+          transparent
+          onRequestClose={closePublicSearchModal}
+        >
+          <View style={[styles.profileEditBackdrop, { paddingHorizontal: horizontalScreenPadding }]}>
+            <View style={[styles.profileEditCard, styles.profileEditCardTall, { backgroundColor: theme.panel, gap: sectionGap }]}>
+              <View style={styles.rowBetween}>
+                <Text style={[styles.title, { color: theme.text, flex: 1, paddingRight: 12 }]}>Search Products</Text>
+                <Pressable onPress={closePublicSearchModal} style={[styles.profileHeaderIconBtn, themedHeaderIconButtonStyle]}>
+                  <Text style={[styles.profileHeaderIcon, { color: theme.text, fontSize: 14, lineHeight: 14 }]}>✕</Text>
+                </Pressable>
+              </View>
+              <View style={styles.locationSearchInputWrap}>
+                <TextInput
+                  ref={publicSearchInputRef}
+                  value={landingSearchQuery}
+                  onChangeText={setLandingSearchQuery}
+                  placeholder="Search any product or item"
+                  placeholderTextColor={theme.subtext}
+                  style={[
+                    styles.searchInput,
+                    landingSearchQuery.trim().length > 0 && styles.searchInputWithClear,
+                    { color: theme.text, backgroundColor: theme.panelSoft },
+                  ]}
+                  autoCapitalize="none"
+                  autoCorrect={false}
+                  returnKeyType="search"
+                />
+                {landingSearchQuery.trim().length > 0 ? (
+                  <Pressable style={styles.searchClearBtn} onPress={() => setLandingSearchQuery('')}>
+                    <Text style={styles.searchClearBtnText}>✕</Text>
+                  </Pressable>
+                ) : null}
+              </View>
+              {landingSearchQuery.trim().length === 0 ? (
+                <Text style={[styles.small, { color: theme.subtext }]}>Search any product or item to see matching results here.</Text>
+              ) : (
+                <Text style={[styles.small, { color: theme.subtext }]}>
+                  {landingSearchResults.length} result{landingSearchResults.length === 1 ? '' : 's'} found
+                </Text>
+              )}
+              {landingSearchQuery.trim().length > 0 ? (
+                <ScrollView keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false} contentContainerStyle={{ gap: sectionGap }}>
+                  {landingSearchResults.length === 0 ? (
+                    <Text style={[styles.small, { color: theme.subtext }]}>No products found for this search.</Text>
+                  ) : (
+                    landingSearchResults.map(product => {
+                      const productCartQty = cartQtyByProductId[product.id] || 0;
+                      const productDiscountPct = getDetailPrice(product).discountPct;
+                      return (
+                        <Pressable
+                          key={`search_${product.id}`}
+                          onPress={() => {
+                            closePublicSearchModal();
+                            openProductDetail(product.id);
+                          }}
+                          style={[styles.productListRow, { backgroundColor: theme.panelSoft }]}
+                        >
+                          <ProductDiscountStrip discountPct={productDiscountPct} isDarkMode={profileDarkMode} />
+                          <Image
+                            source={{ uri: product.thumbnail }}
+                            style={[styles.productListImage, profileDarkMode && styles.productListImageDark]}
+                            resizeMode="cover"
+                          />
+                          <View style={{ flex: 1 }}>
+                            <Text style={[styles.itemText, { color: theme.text }]} numberOfLines={1}>
+                              {getLandingProductTitle(product)}
+                            </Text>
+                            <Text style={[styles.small, { color: theme.subtext }]} numberOfLines={1}>
+                              Model: {getLandingProductModel(product)}
+                            </Text>
+                            {String(product.brand || '').trim() ? (
+                              <Text style={[styles.small, { color: theme.subtext }]} numberOfLines={1}>
+                                Brand: {product.brand}
+                              </Text>
+                            ) : null}
+                            {productCartQty > 0 ? <Text style={styles.productCartHint}>In cart: {productCartQty}</Text> : null}
+                          </View>
+                          <Text style={[styles.small, { color: theme.primary }]}>Open</Text>
+                        </Pressable>
+                      );
+                    })
+                  )}
+                </ScrollView>
+              ) : null}
+            </View>
+          </View>
+        </Modal>
         <Modal
           visible={isProfileModalVisible}
           animationType="slide"
@@ -3846,6 +4270,14 @@ function MainApp() {
                       <Text style={styles.profileMenuIcon}>🧾</Text>
                       <Text style={[styles.profileMenuLabel, { color: profileDarkMode ? '#F8FAFC' : '#111827' }]}>
                         Seller Billing Details
+                      </Text>
+                      <Text style={[styles.profileMenuArrow, { color: profileDarkMode ? '#94A3B8' : '#6B7280' }]}>›</Text>
+                    </Pressable>
+                    <View style={[styles.profileMenuDivider, { backgroundColor: profileDarkMode ? '#1F2937' : '#E5E7EB' }]} />
+                    <Pressable style={styles.profileMenuRow} onPress={() => openProfilePanel('apiHealth')}>
+                      <Text style={styles.profileMenuIcon}>🩺</Text>
+                      <Text style={[styles.profileMenuLabel, { color: profileDarkMode ? '#F8FAFC' : '#111827' }]}>
+                        API Health Check
                       </Text>
                       <Text style={[styles.profileMenuArrow, { color: profileDarkMode ? '#94A3B8' : '#6B7280' }]}>›</Text>
                     </Pressable>
@@ -4415,6 +4847,196 @@ function MainApp() {
                       </Pressable>
                     </>
                   )}
+                </View>
+              ) : null}
+
+              {activeProfilePanel === 'apiHealth' ? (
+                <View
+                  style={[
+                    styles.profilePanelCard,
+                    {
+                      backgroundColor: orderDetailPalette.surface,
+                      borderColor: orderDetailPalette.border,
+                      gap: 12,
+                    },
+                  ]}
+                >
+                  <View
+                    style={[
+                      {
+                        borderRadius: 14,
+                        borderWidth: 1,
+                        borderColor: orderDetailPalette.border,
+                        backgroundColor: orderDetailPalette.surfaceSoft,
+                        padding: 12,
+                        gap: 4,
+                      },
+                    ]}
+                  >
+                    <Text style={[styles.profilePanelMain, { color: orderDetailPalette.title }]}>
+                      Admin API Health Check
+                    </Text>
+                    <Text style={[styles.profilePanelSub, { color: orderDetailPalette.subtext }]}>
+                      This runs a safe, read-only health check for the admin API and database connection only.
+                    </Text>
+                    <Text style={[styles.profilePanelSub, { color: orderDetailPalette.accentText }]}>
+                      Last checked: {formatProfileDateTime(adminApiHealth?.checkedAt)}
+                    </Text>
+                  </View>
+
+                  {isAdminApiHealthLoading ? (
+                    <View style={{ paddingVertical: 22, alignItems: 'center', justifyContent: 'center', gap: 10 }}>
+                      <ActivityIndicator color={orderDetailPalette.buttonBg} />
+                      <Text style={[styles.profilePanelSub, { color: orderDetailPalette.subtext }]}>
+                        Running API health check...
+                      </Text>
+                    </View>
+                  ) : null}
+
+                  {adminApiHealth ? (
+                    <>
+                      <View
+                        style={[
+                          {
+                            borderRadius: 14,
+                            borderWidth: 1,
+                            borderColor: orderDetailPalette.border,
+                            backgroundColor: orderDetailPalette.surfaceSoft,
+                            padding: 12,
+                            gap: 10,
+                          },
+                        ]}
+                      >
+                        <View style={[styles.profilePanelRow, { alignItems: 'center' }]}>
+                          <Text style={[styles.profilePanelMain, { color: orderDetailPalette.title }]}>Overall Status</Text>
+                          <View
+                            style={{
+                              borderRadius: 999,
+                              paddingHorizontal: 12,
+                              paddingVertical: 6,
+                              backgroundColor:
+                                adminApiHealth.status === 'ok'
+                                  ? orderDetailPalette.successBg
+                                  : orderDetailPalette.accentBg,
+                            }}
+                          >
+                            <Text
+                              style={[
+                                styles.profilePanelSub,
+                                {
+                                  color:
+                                    adminApiHealth.status === 'ok'
+                                      ? orderDetailPalette.successText
+                                      : orderDetailPalette.accentText,
+                                },
+                              ]}
+                            >
+                              {adminApiHealth.status === 'ok' ? 'Healthy' : 'Degraded'}
+                            </Text>
+                          </View>
+                        </View>
+                        <View style={styles.profilePanelRow}>
+                          <Text style={[styles.profilePanelSub, { color: orderDetailPalette.subtext }]}>Checked At</Text>
+                          <Text style={[styles.profilePanelSub, { color: orderDetailPalette.title }]}>
+                            {formatProfileDateTime(adminApiHealth.checkedAt)}
+                          </Text>
+                        </View>
+                        <View style={styles.profilePanelRow}>
+                          <Text style={[styles.profilePanelSub, { color: orderDetailPalette.subtext }]}>Server Time</Text>
+                          <Text style={[styles.profilePanelSub, { color: orderDetailPalette.title }]}>
+                            {formatProfileDateTime(adminApiHealth.server.timestamp)}
+                          </Text>
+                        </View>
+                        <View style={styles.profilePanelRow}>
+                          <Text style={[styles.profilePanelSub, { color: orderDetailPalette.subtext }]}>Server Uptime</Text>
+                          <Text style={[styles.profilePanelSub, { color: orderDetailPalette.title }]}>
+                            {formatUptimeLabel(adminApiHealth.server.uptimeSeconds)}
+                          </Text>
+                        </View>
+                        <View style={styles.profilePanelRow}>
+                          <Text style={[styles.profilePanelSub, { color: orderDetailPalette.subtext }]}>Node Version</Text>
+                          <Text style={[styles.profilePanelSub, { color: orderDetailPalette.title }]}>
+                            {adminApiHealth.server.nodeVersion}
+                          </Text>
+                        </View>
+                        <View style={styles.profilePanelRow}>
+                          <Text style={[styles.profilePanelSub, { color: orderDetailPalette.subtext }]}>Database</Text>
+                          <Text
+                            style={[
+                              styles.profilePanelSub,
+                              {
+                                color:
+                                  adminApiHealth.database.status === 'ok'
+                                    ? orderDetailPalette.successText
+                                    : orderDetailPalette.dangerText,
+                              },
+                            ]}
+                          >
+                            {adminApiHealth.database.status === 'ok' ? 'Connected' : 'Issue Detected'}
+                          </Text>
+                        </View>
+                        <Text style={[styles.profilePanelSub, { color: orderDetailPalette.subtext }]}>
+                          {adminApiHealth.database.message}
+                        </Text>
+                        <Text style={[styles.profilePanelSub, { color: orderDetailPalette.subtext }]}>
+                          Database latency: {adminApiHealth.database.latencyMs ?? 'N/A'} ms
+                        </Text>
+                        <Text style={[styles.profilePanelSub, { color: orderDetailPalette.subtext }]}>
+                          Checked as: {adminApiHealth.auth.username} ({adminApiHealth.auth.role})
+                        </Text>
+                      </View>
+                    </>
+                  ) : (
+                    <View
+                      style={[
+                        {
+                          borderRadius: 14,
+                          borderWidth: 1,
+                          borderColor: orderDetailPalette.border,
+                          backgroundColor: orderDetailPalette.surfaceSoft,
+                          padding: 12,
+                        },
+                      ]}
+                    >
+                      <Text style={[styles.profilePanelSub, { color: orderDetailPalette.subtext }]}>
+                        Run the health check to verify the admin API status.
+                      </Text>
+                    </View>
+                  )}
+
+                  {adminApiHealthError ? (
+                    <View
+                      style={[
+                        {
+                          borderRadius: 14,
+                          borderWidth: 1,
+                          borderColor: orderDetailPalette.border,
+                          backgroundColor: orderDetailPalette.surfaceSoft,
+                          padding: 12,
+                        },
+                      ]}
+                    >
+                      <Text style={[styles.profilePanelSub, { color: orderDetailPalette.dangerText }]}>
+                        {adminApiHealthError}
+                      </Text>
+                    </View>
+                  ) : null}
+
+                  <Pressable
+                    style={[
+                      styles.profilePanelPrimaryBtn,
+                      {
+                        backgroundColor: orderDetailPalette.buttonBg,
+                        opacity: isAdminApiHealthLoading ? 0.7 : 1,
+                      },
+                    ]}
+                    onPress={() => void loadAdminApiHealth(true)}
+                    disabled={isAdminApiHealthLoading}
+                  >
+                    <Text style={styles.profilePanelPrimaryText}>
+                      {isAdminApiHealthLoading ? 'Checking...' : 'Run Health Check Again'}
+                    </Text>
+                  </Pressable>
                 </View>
               ) : null}
 
@@ -5762,6 +6384,41 @@ function MainApp() {
                 removeClippedSubviews
                 contentContainerStyle={{ paddingHorizontal: horizontalScreenPadding, paddingBottom: 30, gap: sectionGap }}
               >
+                <View style={styles.locationSearchInputWrap}>
+                  <TextInput
+                    value={viewMoreContext === 'category' ? categoryViewMoreSearch : publicSearch}
+                    onChangeText={viewMoreContext === 'category' ? setCategoryViewMoreSearch : setPublicSearch}
+                    placeholder={
+                      viewMoreContext === 'category'
+                        ? `Search ${viewMoreTitle}`
+                        : 'Search items or products'
+                    }
+                    placeholderTextColor={theme.subtext}
+                    style={[
+                      styles.searchInput,
+                      (viewMoreContext === 'category' ? categoryViewMoreSearch : publicSearch).trim().length > 0 &&
+                        styles.searchInputWithClear,
+                      { color: theme.text, backgroundColor: theme.panel },
+                    ]}
+                    autoCapitalize="none"
+                    autoCorrect={false}
+                    returnKeyType="search"
+                  />
+                  {(viewMoreContext === 'category' ? categoryViewMoreSearch : publicSearch).trim().length > 0 ? (
+                    <Pressable
+                      style={styles.searchClearBtn}
+                      onPress={() => {
+                        if (viewMoreContext === 'category') {
+                          setCategoryViewMoreSearch('');
+                          return;
+                        }
+                        setPublicSearch('');
+                      }}
+                    >
+                      <Text style={styles.searchClearBtnText}>✕</Text>
+                    </Pressable>
+                  ) : null}
+                </View>
                 {viewMoreProducts.length === 0 ? (
                   <Text style={[styles.small, { color: theme.subtext }]}>No related products found.</Text>
                 ) : (
@@ -5853,6 +6510,17 @@ function MainApp() {
       <ScrollView
         removeClippedSubviews
         keyboardShouldPersistTaps="always"
+        refreshControl={
+          <RefreshControl
+            refreshing={isPageRefreshing}
+            onRefresh={() => {
+              void refreshCurrentPage();
+            }}
+            tintColor={theme.primary}
+            colors={[theme.primary]}
+            progressBackgroundColor={theme.panel}
+          />
+        }
         contentContainerStyle={{
           paddingTop: Math.max(10, insets.top),
           paddingHorizontal: horizontalScreenPadding,
@@ -5968,6 +6636,7 @@ function MainApp() {
           setItemTechnologyOption={setItemTechnologyOption}
           itemCapacityAh={itemCapacityAh}
           setItemCapacityAh={setItemCapacityAh}
+          itemDraftVersion={itemDraftVersion}
           itemQty={itemQty}
           setItemQty={setItemQty}
           itemReorder={itemReorder}
@@ -6010,6 +6679,7 @@ function MainApp() {
           customers={customers}
           canDeleteMaster={canDeleteMaster}
           deleteParty={deleteParty}
+          deleteItem={deleteItem}
           selectedItemId={selectedItemId}
           setSelectedItemId={setSelectedItemId}
           items={items}

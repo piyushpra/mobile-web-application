@@ -23,10 +23,11 @@ type Props = {
   categoryCards: CategoryCard[];
   landingCategory: LandingCategory;
   setLandingCategory: (category: LandingCategory) => void;
-  searchedLandingProducts: PublicProduct[];
+  landingSectionProducts: PublicProduct[];
   cartQtyByProductId: Record<string, number>;
   openProductDetail: (id: string) => void;
   publicProducts: PublicProduct[];
+  featuredSectionProducts: PublicProduct[];
   searchedPublicProducts: PublicProduct[];
   isPublicLoading: boolean;
   cartItems: CartItem[];
@@ -45,10 +46,11 @@ function PublicCatalogSections({
   categoryCards,
   landingCategory,
   setLandingCategory,
-  searchedLandingProducts,
+  landingSectionProducts,
   cartQtyByProductId,
   openProductDetail,
   publicProducts,
+  featuredSectionProducts,
   searchedPublicProducts,
   isPublicLoading,
   cartItems,
@@ -118,12 +120,12 @@ function PublicCatalogSections({
   }, [publicView]);
 
   const landingPreviewProducts = React.useMemo(
-    () => searchedLandingProducts.slice(0, 3),
-    [searchedLandingProducts],
+    () => landingSectionProducts.slice(0, 3),
+    [landingSectionProducts],
   );
   const featuredPreviewProducts = React.useMemo(
-    () => searchedPublicProducts.slice(0, 4),
-    [searchedPublicProducts],
+    () => featuredSectionProducts.slice(0, 4),
+    [featuredSectionProducts],
   );
 
   const listItemSeparator = React.useCallback(() => <View style={styles.listItemSeparator} />, []);
@@ -349,7 +351,7 @@ function PublicCatalogSections({
                 <Text style={[styles.small, { color: theme.primary }]}>View More</Text>
               </Pressable>
             </View>
-            {searchedLandingProducts.length === 0 ? (
+            {landingSectionProducts.length === 0 ? (
               <Text style={[styles.small, { color: theme.subtext }]}>No items available.</Text>
             ) : (
               landingPreviewProducts.map(product => {

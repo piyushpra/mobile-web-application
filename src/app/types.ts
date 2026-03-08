@@ -32,7 +32,8 @@ export type ProfilePanel =
   | 'installation'
   | 'warranty'
   | 'language'
-  | 'seller';
+  | 'seller'
+  | 'apiHealth';
 
 export type Theme = {
   bg: string;
@@ -54,6 +55,7 @@ export type Item = {
   id: string;
   name: string;
   sku: string;
+  model?: string;
   images?: string[];
   tags?: string[];
   capacityAh?: string;
@@ -368,6 +370,28 @@ export type SellerBillingSettings = {
   bankBranch?: string;
   declarationNote?: string;
   footerNote?: string;
+};
+
+export type AdminApiHealthStatus = {
+  status: 'ok' | 'degraded';
+  checkedAt: string;
+  server: {
+    status: 'ok';
+    timestamp: string;
+    uptimeSeconds: number | null;
+    nodeVersion: string;
+    appName: string;
+  };
+  database: {
+    status: 'ok' | 'error';
+    latencyMs: number | null;
+    message: string;
+  };
+  auth: {
+    userId: string;
+    role: Role;
+    username: string;
+  };
 };
 
 export type FeedbackOrderItem = {
