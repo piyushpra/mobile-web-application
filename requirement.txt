@@ -24,3 +24,11 @@ Manual trigger if needed:
 
 cd /opt/mobile/mobile-web-application
 npm run release:android:auto
+
+
+
+-----
+
+git -c autoRelease.skipBuild=true pull origin main
+
+sudo htpasswd -c /etc/phpmyadmin/.htpasswd dayal.electronics

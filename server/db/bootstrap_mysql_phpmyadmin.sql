@@ -618,6 +618,12 @@ CREATE TABLE IF NOT EXISTS customer_orders (
   guest_id VARCHAR(60) NULL,
   location_id VARCHAR(64) NULL,
   status ENUM('Processing', 'Delivered', 'Cancelled') NOT NULL DEFAULT 'Processing',
+  invoice_approval_status ENUM('Pending', 'Approved', 'Rejected') NOT NULL DEFAULT 'Approved',
+  invoice_requested_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  invoice_approved_at DATETIME NULL,
+  invoice_approved_by VARCHAR(64) NULL,
+  invoice_rejected_at DATETIME NULL,
+  invoice_rejected_by VARCHAR(64) NULL,
   subtotal DECIMAL(14,2) NOT NULL DEFAULT 0.00,
   discount DECIMAL(14,2) NOT NULL DEFAULT 0.00,
   delivery_fee DECIMAL(14,2) NOT NULL DEFAULT 0.00,
@@ -629,6 +635,7 @@ CREATE TABLE IF NOT EXISTS customer_orders (
   KEY idx_customer_orders_user_placed (user_id, placed_at),
   KEY idx_customer_orders_guest_placed (guest_id, placed_at),
   KEY idx_customer_orders_location (location_id),
+  KEY idx_customer_orders_invoice_approval (invoice_approval_status, placed_at),
   CONSTRAINT fk_customer_orders_user
     FOREIGN KEY (user_id) REFERENCES users(id)
     ON DELETE SET NULL

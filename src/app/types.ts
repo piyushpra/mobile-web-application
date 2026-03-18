@@ -1,4 +1,4 @@
-export type Role = 'admin' | 'manager' | 'staff';
+export type Role = 'admin' | 'manager' | 'staff' | 'customer';
 export type ItemTechnologyOption =
   | 'Sinewave'
   | 'Eco Watt'
@@ -32,6 +32,7 @@ export type ProfilePanel =
   | 'installation'
   | 'warranty'
   | 'language'
+  | 'orderRequests'
   | 'seller'
   | 'apiHealth';
 
@@ -318,6 +319,10 @@ export type ProfileOrder = {
   category?: string;
   model?: string;
   thumbnail?: string;
+  invoiceApprovalStatus?: 'Pending' | 'Approved' | 'Rejected';
+  invoiceRequestedAt?: string;
+  invoiceApprovedAt?: string | null;
+  invoiceRejectedAt?: string | null;
   items: Array<{
     id: string;
     productId?: string | null;
@@ -332,6 +337,22 @@ export type ProfileOrder = {
     thumbnail?: string;
   }>;
   invoice?: InvoiceDetail | null;
+};
+
+export type AdminOrderRequest = {
+  id: string;
+  orderNumber: string;
+  customerName: string;
+  customerEmail?: string;
+  customerPhone?: string;
+  itemCount: number;
+  total: number;
+  placedAt: string;
+  invoiceNumber?: string;
+  invoiceApprovalStatus: 'Pending' | 'Approved' | 'Rejected';
+  invoiceRequestedAt?: string;
+  invoiceApprovedAt?: string | null;
+  invoiceRejectedAt?: string | null;
 };
 
 export type ProfilePaymentMethod = {

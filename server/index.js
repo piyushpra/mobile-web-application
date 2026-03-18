@@ -1349,7 +1349,7 @@ function normalizeParty(party, type) {
 }
 
 function normalizeUser(user) {
-  const role = ['admin', 'manager', 'staff'].includes(user.role) ? user.role : 'staff';
+  const role = ['admin', 'manager', 'staff', 'customer'].includes(user.role) ? user.role : 'customer';
   return {
     id: String(user.id || `u_${crypto.randomUUID().slice(0, 8)}`),
     username: String(user.username || '').trim(),
@@ -3027,6 +3027,12 @@ async function ensureDb() {
           guest_id VARCHAR(60) NULL,
           location_id VARCHAR(64) NULL,
           status ENUM('Processing', 'Delivered', 'Cancelled') NOT NULL DEFAULT 'Processing',
+          invoice_approval_status ENUM('Pending', 'Approved', 'Rejected') NOT NULL DEFAULT 'Approved',
+          invoice_requested_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          invoice_approved_at DATETIME NULL,
+          invoice_approved_by VARCHAR(64) NULL,
+          invoice_rejected_at DATETIME NULL,
+          invoice_rejected_by VARCHAR(64) NULL,
           subtotal DECIMAL(14,2) NOT NULL DEFAULT 0.00,
           discount DECIMAL(14,2) NOT NULL DEFAULT 0.00,
           delivery_fee DECIMAL(14,2) NOT NULL DEFAULT 0.00,
@@ -3048,6 +3054,86 @@ async function ensureDb() {
             ON UPDATE CASCADE
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
       );
+
+      const [customerOrderColumnRows] = await conn.query(
+        `SELECT column_name
+         FROM information_schema.columns
+         WHERE table_schema = ?
+           AND table_name = 'customer_orders'`,
+        [MYSQL_DATABASE],
+      );
+      const customerOrderColumnSet = new Set(
+        (Array.isArray(customerOrderColumnRows) ? customerOrderColumnRows : []).map(
+          row => row.COLUMN_NAME || row.column_name,
+        ),
+      );
+      const customerOrderDefs = [
+        [
+          'invoice_approval_status',
+          `ALTER TABLE customer_orders
+           ADD COLUMN invoice_approval_status ENUM('Pending', 'Approved', 'Rejected') NOT NULL DEFAULT 'Approved' AFTER status`,
+        ],
+        [
+          'invoice_requested_at',
+          `ALTER TABLE customer_orders
+           ADD COLUMN invoice_requested_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP AFTER invoice_approval_status`,
+        ],
+        [
+          'invoice_approved_at',
+          `ALTER TABLE customer_orders
+           ADD COLUMN invoice_approved_at DATETIME NULL AFTER invoice_requested_at`,
+        ],
+        [
+          'invoice_approved_by',
+          `ALTER TABLE customer_orders
+           ADD COLUMN invoice_approved_by VARCHAR(64) NULL AFTER invoice_approved_at`,
+        ],
+        [
+          'invoice_rejected_at',
+          `ALTER TABLE customer_orders
+           ADD COLUMN invoice_rejected_at DATETIME NULL AFTER invoice_approved_by`,
+        ],
+        [
+          'invoice_rejected_by',
+          `ALTER TABLE customer_orders
+           ADD COLUMN invoice_rejected_by VARCHAR(64) NULL AFTER invoice_rejected_at`,
+        ],
+      ];
+      for (const [columnName, ddl] of customerOrderDefs) {
+        if (!customerOrderColumnSet.has(columnName)) {
+          await conn.query(ddl);
+        }
+      }
+
+      await conn.query(
+        `ALTER TABLE customer_orders
+         MODIFY COLUMN invoice_approval_status ENUM('Pending', 'Approved', 'Rejected') NOT NULL DEFAULT 'Approved'`,
+      );
+
+      await conn.query(
+        `UPDATE customer_orders
+         SET invoice_approval_status = COALESCE(invoice_approval_status, 'Approved')
+         WHERE invoice_approval_status IS NULL`,
+      );
+
+      const [customerOrderIndexRows] = await conn.query(
+        `SELECT index_name
+         FROM information_schema.statistics
+         WHERE table_schema = ?
+           AND table_name = 'customer_orders'`,
+        [MYSQL_DATABASE],
+      );
+      const customerOrderIndexSet = new Set(
+        (Array.isArray(customerOrderIndexRows) ? customerOrderIndexRows : []).map(
+          row => row.INDEX_NAME || row.index_name,
+        ),
+      );
+      if (!customerOrderIndexSet.has('idx_customer_orders_invoice_approval')) {
+        await conn.query(
+          `ALTER TABLE customer_orders
+           ADD KEY idx_customer_orders_invoice_approval (invoice_approval_status, placed_at)`,
+        );
+      }
 
       await conn.query(
         `CREATE TABLE IF NOT EXISTS customer_order_items (
@@ -4905,6 +4991,23 @@ async function fetchCartItemsByCartId(conn, cartId, req = null) {
   }));
 }
 
+function normalizeInvoiceApprovalStatus(value) {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (normalized === 'pending') {
+    return 'Pending';
+  }
+  if (normalized === 'rejected') {
+    return 'Rejected';
+  }
+  return 'Approved';
+}
+
+function getInvoiceApprovalErrorMessage(status) {
+  return normalizeInvoiceApprovalStatus(status) === 'Rejected'
+    ? 'Invoice request was disapproved by admin'
+    : 'Invoice is awaiting admin approval';
+}
+
 async function fetchOrdersByOwner(conn, owner, req = null, options = {}) {
   const ownerWhere = buildOwnerCondition(owner);
   const filterSql = compactText(options.orderId) ? ' AND co.id = ?' : '';
@@ -4913,6 +5016,10 @@ async function fetchOrdersByOwner(conn, owner, req = null, options = {}) {
     `SELECT co.id AS order_id,
             co.order_number,
             co.status,
+            co.invoice_approval_status,
+            co.invoice_requested_at,
+            co.invoice_approved_at,
+            co.invoice_rejected_at,
             co.placed_at,
             co.created_at,
             co.total,
@@ -4960,6 +5067,7 @@ async function fetchOrdersByOwner(conn, owner, req = null, options = {}) {
   for (const row of orderRows) {
     let order = groupedOrders.get(row.order_id);
     if (!order) {
+      const invoiceApprovalStatus = normalizeInvoiceApprovalStatus(row.invoice_approval_status);
       order = {
         id: row.order_id,
         orderNumber: row.order_number || row.order_id,
@@ -4975,8 +5083,12 @@ async function fetchOrdersByOwner(conn, owner, req = null, options = {}) {
         category: row.category || '',
         model: row.model || row.order_item_model || row.product_name || '',
         thumbnail: resolveAssetUrl(req, row.thumbnail || getFallbackThumbnail()),
+        invoiceApprovalStatus,
+        invoiceRequestedAt: toIso(row.invoice_requested_at),
+        invoiceApprovedAt: toIso(row.invoice_approved_at),
+        invoiceRejectedAt: toIso(row.invoice_rejected_at),
         items: [],
-        invoice: invoicesByOrder.get(row.order_id) || null,
+        invoice: invoiceApprovalStatus === 'Approved' ? invoicesByOrder.get(row.order_id) || null : null,
       };
       groupedOrders.set(row.order_id, order);
     }
@@ -4985,6 +5097,66 @@ async function fetchOrdersByOwner(conn, owner, req = null, options = {}) {
     order.items.push(previewItem);
   }
   return Array.from(groupedOrders.values());
+}
+
+async function fetchAdminOrderRequests(conn, options = {}) {
+  const safeLimit = Math.max(1, Math.min(500, parseNumber(options.limit, 200)));
+  const orderId = compactText(options.orderId);
+  const filters = [];
+  const params = [];
+  if (orderId) {
+    filters.push('co.id = ?');
+    params.push(orderId);
+  }
+  const whereSql = filters.length > 0 ? `WHERE ${filters.join(' AND ')}` : '';
+  const [rows] = await conn.query(
+    `SELECT co.id,
+            co.order_number,
+            co.total,
+            co.placed_at,
+            co.invoice_approval_status,
+            co.invoice_requested_at,
+            co.invoice_approved_at,
+            co.invoice_rejected_at,
+            COALESCE(i.invoice_number, '') AS invoice_number,
+            COALESCE(i.bill_to_name, '') AS customer_name,
+            COALESCE(i.bill_to_email, '') AS customer_email,
+            COALESCE(i.bill_to_phone, '') AS customer_phone,
+            COALESCE(items.item_count, 0) AS item_count
+     FROM customer_orders co
+     LEFT JOIN invoices i ON i.order_id = co.id
+     LEFT JOIN (
+       SELECT order_id, SUM(qty) AS item_count
+       FROM customer_order_items
+       GROUP BY order_id
+     ) items ON items.order_id = co.id
+     ${whereSql}
+     ORDER BY
+       CASE
+         WHEN co.invoice_approval_status = 'Pending' THEN 0
+         ELSE 1
+       END,
+       co.placed_at DESC,
+       co.created_at DESC,
+       co.id DESC
+     LIMIT ?`,
+    [...params, safeLimit],
+  );
+  return (Array.isArray(rows) ? rows : []).map(row => ({
+    id: row.id,
+    orderNumber: row.order_number || row.id,
+    customerName: row.customer_name || 'Customer',
+    customerEmail: row.customer_email || '',
+    customerPhone: row.customer_phone || '',
+    itemCount: Math.max(0, Math.round(parseNumber(row.item_count, 0))),
+    total: parseNumber(row.total, 0),
+    placedAt: toIso(row.placed_at),
+    invoiceNumber: row.invoice_number || '',
+    invoiceApprovalStatus: normalizeInvoiceApprovalStatus(row.invoice_approval_status),
+    invoiceRequestedAt: toIso(row.invoice_requested_at),
+    invoiceApprovedAt: toIso(row.invoice_approved_at),
+    invoiceRejectedAt: toIso(row.invoice_rejected_at),
+  }));
 }
 
 async function fetchWishlistIds(conn, userId) {
@@ -5702,47 +5874,64 @@ const server = http.createServer(async (req, res) => {
         id: `u_${crypto.randomUUID().slice(0, 8)}`,
         username,
         password: await hashPassword(password),
-        role: 'staff',
+        role: 'customer',
         name: name || username,
       });
 
       await ensureDb();
+      const conn = await mysqlPool.getConnection();
       try {
-        await mysqlPool.query(
+        await conn.beginTransaction();
+        await conn.query(
           `INSERT INTO users (id, username, password_hash, role, full_name, phone, is_active)
            VALUES (?, ?, ?, ?, ?, ?, 1)`,
           [user.id, user.username, user.password, user.role, user.name, phone || null],
         );
+        await conn.query(
+          `INSERT IGNORE INTO user_preferences (user_id, dark_mode, language)
+           VALUES (?, 0, 'English')`,
+          [user.id],
+        );
+        await conn.query(
+          `INSERT IGNORE INTO user_dark_mode_settings (user_id, dark_mode)
+           VALUES (?, 0)`,
+          [user.id],
+        );
+        await conn.query(
+          `INSERT IGNORE INTO notification_preferences (user_id, order_updates, promotions, warranty_alerts)
+           VALUES (?, 1, 1, 1)`,
+          [user.id],
+        );
+        await ensureStorefrontCustomer(conn, { userId: user.id }, {
+          firstName: user.name,
+          lastName: '',
+          email: user.username,
+          phone,
+          billingAddress: '',
+          shippingAddress: '',
+        });
+        await conn.commit();
       } catch (error) {
+        try {
+          await conn.rollback();
+        } catch {
+          // ignore rollback errors
+        }
         if (error && error.code === 'ER_DUP_ENTRY') {
           sendError(res, 409, 'username already exists');
           return;
         }
         throw error;
+      } finally {
+        conn.release();
       }
-
-      await mysqlPool.query(
-        `INSERT IGNORE INTO user_preferences (user_id, dark_mode, language)
-         VALUES (?, 0, 'English')`,
-        [user.id],
-      );
-      await mysqlPool.query(
-        `INSERT IGNORE INTO user_dark_mode_settings (user_id, dark_mode)
-         VALUES (?, 0)`,
-        [user.id],
-      );
-      await mysqlPool.query(
-        `INSERT IGNORE INTO notification_preferences (user_id, order_updates, promotions, warranty_alerts)
-         VALUES (?, 1, 1, 1)`,
-        [user.id],
-      );
 
       sendJson(res, 201, { user: toPublicUser(user) });
       return;
     }
 
     if (pathname === '/api/auth/me' && req.method === 'GET') {
-      const auth = await requireAuth(req, res, ['admin', 'manager', 'staff']);
+      const auth = await requireAuth(req, res, ['admin', 'manager', 'staff', 'customer']);
       if (!auth) {
         return;
       }
@@ -6073,14 +6262,17 @@ const server = http.createServer(async (req, res) => {
         const placedAt = new Date();
         await conn.query(
           `INSERT INTO customer_orders
-            (id, order_number, user_id, guest_id, location_id, status, subtotal, discount, delivery_fee, total, placed_at, created_at)
-           VALUES (?, ?, ?, ?, ?, 'Processing', ?, ?, ?, ?, ?, ?)`,
+            (id, order_number, user_id, guest_id, location_id, status, invoice_approval_status, invoice_requested_at,
+             invoice_approved_at, invoice_approved_by, invoice_rejected_at, invoice_rejected_by, subtotal, discount,
+             delivery_fee, total, placed_at, created_at)
+           VALUES (?, ?, ?, ?, ?, 'Processing', 'Pending', ?, NULL, NULL, NULL, NULL, ?, ?, ?, ?, ?, ?)`,
           [
             orderId,
             orderNumber,
             owner.userId || null,
             owner.guestId || null,
             locationId,
+            placedAt,
             subtotal,
             discount,
             deliveryFee,
@@ -6282,7 +6474,15 @@ const server = http.createServer(async (req, res) => {
       try {
         const orders = await fetchOrdersByOwner(conn, owner, req, { orderId: storefrontInvoiceLinkOrderId });
         const order = Array.isArray(orders) ? orders[0] || null : null;
-        if (!order || !order.invoice) {
+        if (!order) {
+          sendError(res, 404, 'Order not found');
+          return;
+        }
+        if (order.invoiceApprovalStatus !== 'Approved') {
+          sendError(res, 403, getInvoiceApprovalErrorMessage(order.invoiceApprovalStatus));
+          return;
+        }
+        if (!order.invoice) {
           sendError(res, 404, 'Invoice not found for this order');
           return;
         }
@@ -6310,7 +6510,15 @@ const server = http.createServer(async (req, res) => {
       try {
         const orders = await fetchOrdersByOwner(conn, owner, req, { orderId: storefrontInvoiceDownloadOrderId });
         const order = Array.isArray(orders) ? orders[0] || null : null;
-        if (!order || !order.invoice) {
+        if (!order) {
+          sendError(res, 404, 'Order not found');
+          return;
+        }
+        if (order.invoiceApprovalStatus !== 'Approved') {
+          sendError(res, 403, getInvoiceApprovalErrorMessage(order.invoiceApprovalStatus));
+          return;
+        }
+        if (!order.invoice) {
           sendError(res, 404, 'Invoice not found for this order');
           return;
         }
@@ -6604,6 +6812,101 @@ const server = http.createServer(async (req, res) => {
       try {
         const settings = await upsertInvoiceSellerProfile(conn, body, authUser.userId);
         sendJson(res, 200, { settings });
+      } finally {
+        conn.release();
+      }
+      return;
+    }
+
+    if (pathname === '/api/public/storefront/admin/order-requests' && req.method === 'GET') {
+      const authUser = await getAuth(req);
+      if (!authUser?.userId) {
+        sendError(res, 401, 'Login required for order requests');
+        return;
+      }
+      if (authUser.role !== 'admin') {
+        sendError(res, 403, 'Only admin can review order requests');
+        return;
+      }
+      const conn = await mysqlPool.getConnection();
+      try {
+        const requests = await fetchAdminOrderRequests(conn);
+        sendJson(res, 200, { requests });
+      } finally {
+        conn.release();
+      }
+      return;
+    }
+
+    const storefrontAdminApproveOrderRequestId = getPathAction(
+      pathname,
+      '/api/public/storefront/admin/order-requests',
+      'approve',
+    );
+    const storefrontAdminRejectOrderRequestId = getPathAction(
+      pathname,
+      '/api/public/storefront/admin/order-requests',
+      'reject',
+    );
+    const storefrontAdminOrderRequestId = storefrontAdminApproveOrderRequestId || storefrontAdminRejectOrderRequestId;
+    if (storefrontAdminOrderRequestId && req.method === 'POST') {
+      const authUser = await getAuth(req);
+      if (!authUser?.userId) {
+        sendError(res, 401, 'Login required for order requests');
+        return;
+      }
+      if (authUser.role !== 'admin') {
+        sendError(res, 403, 'Only admin can approve order requests');
+        return;
+      }
+      const conn = await mysqlPool.getConnection();
+      try {
+        await conn.beginTransaction();
+        const nextStatus = storefrontAdminApproveOrderRequestId ? 'Approved' : 'Rejected';
+        const [orderRows] = await conn.query(
+          `SELECT co.id, co.invoice_approval_status, i.id AS invoice_id
+           FROM customer_orders co
+           LEFT JOIN invoices i ON i.order_id = co.id
+           WHERE co.id = ?
+           LIMIT 1`,
+          [storefrontAdminOrderRequestId],
+        );
+        const orderRow = Array.isArray(orderRows) ? orderRows[0] || null : null;
+        if (!orderRow) {
+          await conn.rollback();
+          sendError(res, 404, 'Order request not found');
+          return;
+        }
+        if (!orderRow.invoice_id) {
+          await conn.rollback();
+          sendError(res, 404, 'Invoice draft not found for this order');
+          return;
+        }
+        if (normalizeInvoiceApprovalStatus(orderRow.invoice_approval_status) !== nextStatus) {
+          await conn.query(
+            `UPDATE customer_orders
+             SET invoice_approval_status = ?,
+                 invoice_approved_at = ?,
+                 invoice_approved_by = ?,
+                 invoice_rejected_at = ?,
+                 invoice_rejected_by = ?
+             WHERE id = ?`,
+            [
+              nextStatus,
+              nextStatus === 'Approved' ? new Date() : null,
+              nextStatus === 'Approved' ? authUser.userId : null,
+              nextStatus === 'Rejected' ? new Date() : null,
+              nextStatus === 'Rejected' ? authUser.userId : null,
+              storefrontAdminOrderRequestId,
+            ],
+          );
+        }
+        const requests = await fetchAdminOrderRequests(conn, { orderId: storefrontAdminOrderRequestId, limit: 1 });
+        await conn.commit();
+        sendJson(res, 200, { request: requests[0] || null });
+      } catch (error) {
+        await conn.rollback();
+        throw error;
       } finally {
         conn.release();
       }

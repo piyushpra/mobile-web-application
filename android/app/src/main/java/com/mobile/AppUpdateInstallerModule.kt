@@ -1,8 +1,11 @@
 package com.mobile
 
+import android.content.ContentValues
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
+import android.os.Environment
+import android.provider.MediaStore
 import android.provider.Settings
 import androidx.core.content.FileProvider
 import com.facebook.react.bridge.Arguments
@@ -13,6 +16,8 @@ import com.facebook.react.bridge.ReactMethod
 import com.facebook.react.modules.core.DeviceEventManagerModule
 import java.io.File
 import java.io.FileOutputStream
+import java.io.IOException
+import java.io.InputStream
 import java.net.HttpURLConnection
 import java.net.URL
 import java.security.MessageDigest
@@ -173,6 +178,58 @@ class AppUpdateInstallerModule(private val reactContext: ReactApplicationContext
   }
 
   @ReactMethod
+  fun downloadDocument(downloadUrl: String, fileName: String?, mimeType: String?, promise: Promise) {
+    val normalizedUrl = downloadUrl.trim()
+    if (normalizedUrl.isEmpty()) {
+      promise.reject("INVALID_URL", "Download URL is required")
+      return
+    }
+
+    val targetMimeType = mimeType?.trim()?.takeIf { it.isNotEmpty() } ?: "application/octet-stream"
+    val targetFileName = sanitizeDocumentFileName(fileName, normalizedUrl, targetMimeType)
+
+    Thread {
+      var connection: HttpURLConnection? = null
+      try {
+        connection = (URL(normalizedUrl).openConnection() as HttpURLConnection).apply {
+          requestMethod = "GET"
+          instanceFollowRedirects = true
+          connectTimeout = 15000
+          readTimeout = 30000
+          doInput = true
+        }
+        connection.connect()
+
+        val statusCode = connection.responseCode
+        if (statusCode !in 200..299) {
+          throw IllegalStateException("Download failed with status $statusCode")
+        }
+
+        val savedDocument =
+            connection.inputStream.use { inputStream ->
+              saveDocumentToStorage(
+                  fileName = targetFileName,
+                  mimeType = targetMimeType,
+                  inputStream = inputStream,
+              )
+            }
+
+        val result =
+            Arguments.createMap().apply {
+              putString("fileName", savedDocument.fileName)
+              putString("uri", savedDocument.uri.toString())
+              putString("savedIn", savedDocument.savedIn)
+            }
+        promise.resolve(result)
+      } catch (error: Exception) {
+        promise.reject("DOCUMENT_DOWNLOAD_FAILED", error.message ?: "Unable to download document", error)
+      } finally {
+        connection?.disconnect()
+      }
+    }.start()
+  }
+
+  @ReactMethod
   fun cancelDownload(promise: Promise) {
     val active = downloadThread?.isAlive == true
     if (active) {
@@ -300,12 +357,116 @@ class AppUpdateInstallerModule(private val reactContext: ReactApplicationContext
     return if (sanitized.lowercase(Locale.ROOT).endsWith(".apk")) sanitized else "$sanitized.apk"
   }
 
+  private fun sanitizeDocumentFileName(rawFileName: String?, downloadUrl: String, mimeType: String): String {
+    val fromArg = rawFileName?.trim().orEmpty()
+    val fromUrl = Uri.parse(downloadUrl).lastPathSegment?.trim().orEmpty().substringBefore('?')
+    val defaultName = if (mimeType.equals("application/pdf", ignoreCase = true)) "invoice.pdf" else "document"
+    val candidate =
+        sequenceOf(fromArg, fromUrl, defaultName)
+            .firstOrNull { it.isNotBlank() }
+            ?: defaultName
+    val sanitized = candidate.replace(Regex("[^A-Za-z0-9._-]"), "-").trim('-')
+    val normalized = sanitized.ifBlank { defaultName }
+    return if (mimeType.equals("application/pdf", ignoreCase = true) &&
+        !normalized.lowercase(Locale.ROOT).endsWith(".pdf")) {
+      "$normalized.pdf"
+    } else {
+      normalized
+    }
+  }
+
+  private fun saveDocumentToStorage(fileName: String, mimeType: String, inputStream: InputStream): SavedDocumentResult {
+    return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+      saveDocumentToMediaStore(fileName, mimeType, inputStream)
+    } else {
+      saveDocumentToAppDownloads(fileName, inputStream)
+    }
+  }
+
+  private fun saveDocumentToMediaStore(
+      fileName: String,
+      mimeType: String,
+      inputStream: InputStream,
+  ): SavedDocumentResult {
+    val resolver = reactContext.contentResolver
+    val relativePath = "${Environment.DIRECTORY_DOWNLOADS}/FuElectric"
+    val values =
+        ContentValues().apply {
+          put(MediaStore.MediaColumns.DISPLAY_NAME, fileName)
+          put(MediaStore.MediaColumns.MIME_TYPE, mimeType)
+          put(MediaStore.MediaColumns.RELATIVE_PATH, relativePath)
+          put(MediaStore.MediaColumns.IS_PENDING, 1)
+        }
+
+    val documentUri =
+        resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+            ?: throw IOException("Unable to create invoice file")
+
+    try {
+      resolver.openOutputStream(documentUri, "w")?.use { outputStream ->
+        inputStream.copyTo(outputStream, BUFFER_SIZE)
+        outputStream.flush()
+      } ?: throw IOException("Unable to open invoice file")
+
+      val completedValues = ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) }
+      resolver.update(documentUri, completedValues, null, null)
+
+      return SavedDocumentResult(
+          uri = documentUri,
+          fileName = fileName,
+          savedIn = "Downloads/FuElectric",
+      )
+    } catch (error: Exception) {
+      resolver.delete(documentUri, null, null)
+      throw error
+    }
+  }
+
+  private fun saveDocumentToAppDownloads(fileName: String, inputStream: InputStream): SavedDocumentResult {
+    val baseDir =
+        reactContext.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS)
+            ?: File(reactContext.filesDir, "downloads")
+    val outputDir = File(baseDir, "FuElectric").apply { mkdirs() }
+    val targetFile = createUniqueFile(outputDir, fileName)
+
+    FileOutputStream(targetFile).use { outputStream ->
+      inputStream.copyTo(outputStream, BUFFER_SIZE)
+      outputStream.fd.sync()
+    }
+
+    return SavedDocumentResult(
+        uri = Uri.fromFile(targetFile),
+        fileName = targetFile.name,
+        savedIn = "App Downloads/FuElectric",
+    )
+  }
+
+  private fun createUniqueFile(directory: File, requestedFileName: String): File {
+    val cleanName = requestedFileName.ifBlank { "document" }
+    val dotIndex = cleanName.lastIndexOf('.')
+    val baseName = if (dotIndex > 0) cleanName.substring(0, dotIndex) else cleanName
+    val extension = if (dotIndex > 0) cleanName.substring(dotIndex) else ""
+    var candidate = File(directory, cleanName)
+    var suffix = 1
+    while (candidate.exists()) {
+      candidate = File(directory, "$baseName-$suffix$extension")
+      suffix += 1
+    }
+    return candidate
+  }
+
   private fun progressValue(downloadedBytes: Long, totalBytes: Long?): Double {
     if (totalBytes == null || totalBytes <= 0L) {
       return 0.0
     }
     return downloadedBytes.toDouble() / totalBytes.toDouble()
   }
+
+  private data class SavedDocumentResult(
+      val uri: Uri,
+      val fileName: String,
+      val savedIn: String,
+  )
 
   private class UpdateDownloadCancelledException : RuntimeException()
 }

@@ -53,9 +53,11 @@ import {
   startAppUpdateDownload,
   type AppUpdateDownloadEvent,
 } from './appUpdateInstaller';
+import { downloadDocumentToDevice, isDocumentDownloaderAvailable } from './documentDownloader';
 import styles from './styles';
 import type {
   AdminApiHealthStatus,
+  AdminOrderRequest,
   AuthMode,
   CartItem,
   DeliveryLocation,
@@ -333,6 +335,13 @@ function toFetchError(url: string, err: unknown, fallback = 'Request failed') {
   return new Error(sanitizeUserFacingErrorMessage(message, fallback));
 }
 
+function toInvoicePdfFileName(invoiceNumber: string, fallbackOrderId: string) {
+  const rawBase = String(invoiceNumber || fallbackOrderId || 'invoice').trim();
+  const sanitizedBase = rawBase.replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '').trim();
+  const normalizedBase = sanitizedBase || 'invoice';
+  return normalizedBase.toLowerCase().endsWith('.pdf') ? normalizedBase : `${normalizedBase}.pdf`;
+}
+
 function formatCurrency(value: number) {
   const amount = Number(value || 0);
   return `₹${amount.toLocaleString('en-IN', {
@@ -461,6 +470,33 @@ function normalizeOrderStatus(value: unknown): ProfileOrder['status'] {
   return 'Processing';
 }
 
+function normalizeInvoiceApprovalStatus(value: unknown): 'Pending' | 'Approved' | 'Rejected' {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (normalized === 'pending') {
+    return 'Pending';
+  }
+  if (normalized === 'rejected') {
+    return 'Rejected';
+  }
+  return 'Approved';
+}
+
+function getOrderDisplayStatus(
+  value: Pick<ProfileOrder, 'status' | 'invoiceApprovalStatus'> | null | undefined,
+): 'Processing' | 'Delivered' | 'Cancelled' | 'Success' {
+  const normalizedOrderStatus = String(value?.status || '').trim().toLowerCase();
+  if (normalizedOrderStatus === 'cancelled') {
+    return 'Cancelled';
+  }
+  if (normalizedOrderStatus === 'delivered') {
+    return 'Delivered';
+  }
+  if (normalizeInvoiceApprovalStatus(value?.invoiceApprovalStatus) === 'Approved') {
+    return 'Success';
+  }
+  return 'Processing';
+}
+
 function normalizeProfileOrderItem(
   value: Partial<ProfileOrder['items'][number]> | null | undefined,
   index: number,
@@ -584,6 +620,10 @@ function normalizeProfileOrder(value: Partial<ProfileOrder> | null | undefined, 
     category: String(value?.category || ''),
     model: String(value?.model || items[0]?.model || items[0]?.name || ''),
     thumbnail: String(value?.thumbnail || items[0]?.thumbnail || ''),
+    invoiceApprovalStatus: normalizeInvoiceApprovalStatus(value?.invoiceApprovalStatus),
+    invoiceRequestedAt: toOptionalText(value?.invoiceRequestedAt),
+    invoiceApprovedAt: toOptionalText(value?.invoiceApprovedAt),
+    invoiceRejectedAt: toOptionalText(value?.invoiceRejectedAt),
     items,
     invoice: normalizeInvoiceDetail(value?.invoice, value || undefined),
   };
@@ -594,6 +634,34 @@ function normalizeProfileOrders(value: ProfileOrder[] | Partial<ProfileOrder>[] 
     return [];
   }
   return value.map((order, index) => normalizeProfileOrder(order, index));
+}
+
+function normalizeAdminOrderRequest(
+  value: Partial<AdminOrderRequest> | null | undefined,
+  index = 0,
+): AdminOrderRequest {
+  return {
+    id: String(value?.id || value?.orderNumber || `order_request_${index + 1}`),
+    orderNumber: String(value?.orderNumber || value?.id || `Order Request ${index + 1}`),
+    customerName: String(value?.customerName || 'Customer'),
+    customerEmail: toOptionalText(value?.customerEmail),
+    customerPhone: toOptionalText(value?.customerPhone),
+    itemCount: Math.max(0, Math.round(toFiniteNumber(value?.itemCount, 0))),
+    total: toFiniteNumber(value?.total, 0),
+    placedAt: String(value?.placedAt || ''),
+    invoiceNumber: toOptionalText(value?.invoiceNumber),
+    invoiceApprovalStatus: normalizeInvoiceApprovalStatus(value?.invoiceApprovalStatus),
+    invoiceRequestedAt: toOptionalText(value?.invoiceRequestedAt),
+    invoiceApprovedAt: toOptionalText(value?.invoiceApprovedAt),
+    invoiceRejectedAt: toOptionalText(value?.invoiceRejectedAt),
+  };
+}
+
+function normalizeAdminOrderRequests(value: AdminOrderRequest[] | Partial<AdminOrderRequest>[] | null | undefined) {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.map((request, index) => normalizeAdminOrderRequest(request, index));
 }
 
 function normalizeSellerBillingSettings(value: Partial<SellerBillingSettings> | null | undefined): SellerBillingSettings {
@@ -767,6 +835,9 @@ function MainApp() {
   const [sellerBillingDraft, setSellerBillingDraft] = useState<SellerBillingSettings>(DEFAULT_SELLER_BILLING_SETTINGS);
   const [isSellerBillingLoading, setIsSellerBillingLoading] = useState(false);
   const [isSellerBillingSaving, setIsSellerBillingSaving] = useState(false);
+  const [adminOrderRequests, setAdminOrderRequests] = useState<AdminOrderRequest[]>([]);
+  const [isAdminOrderRequestsLoading, setIsAdminOrderRequestsLoading] = useState(false);
+  const [approvingAdminOrderId, setApprovingAdminOrderId] = useState<string | null>(null);
   const [adminApiHealth, setAdminApiHealth] = useState<AdminApiHealthStatus | null>(null);
   const [adminApiHealthError, setAdminApiHealthError] = useState<string | null>(null);
   const [isAdminApiHealthLoading, setIsAdminApiHealthLoading] = useState(false);
@@ -850,6 +921,7 @@ function MainApp() {
   const publicScrollRef = useRef<ScrollView | null>(null);
   const publicSearchInputRef = useRef<TextInput | null>(null);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pendingProductDetailCapacityRef = useRef<string | null>(null);
   const guestIdRef = useRef(`gst_${Math.random().toString(36).slice(2, 10)}`);
   const lastAddActionRef = useRef<{ id: string; ts: number } | null>(null);
   const addActionLockRef = useRef(false);
@@ -1389,20 +1461,24 @@ function MainApp() {
   };
 
   const openProfilePanel = (panel: ProfilePanel) => {
-    if (panel === 'seller' || panel === 'apiHealth') {
+    if (panel === 'seller' || panel === 'apiHealth' || panel === 'orderRequests') {
       if (!token || user?.role !== 'admin') {
         Alert.alert(
           'Admin Only',
           panel === 'seller'
             ? 'Seller billing settings are available only for admin login.'
-            : 'API health check is available only for admin login.',
+            : panel === 'apiHealth'
+              ? 'API health check is available only for admin login.'
+              : 'Order requests are available only for admin login.',
         );
         return;
       }
       if (panel === 'seller') {
         void loadSellerBillingSettings();
-      } else {
+      } else if (panel === 'apiHealth') {
         void loadAdminApiHealth();
+      } else {
+        void loadAdminOrderRequests();
       }
     }
     setActiveProfilePanel(panel);
@@ -1501,6 +1577,113 @@ function MainApp() {
     } finally {
       setIsAdminApiHealthLoading(false);
     }
+  };
+
+  const loadAdminOrderRequests = async (showFailureAlert = false) => {
+    if (!token || user?.role !== 'admin') {
+      return;
+    }
+    try {
+      setIsAdminOrderRequestsLoading(true);
+      const json = await storefrontApiRequest<{ requests?: AdminOrderRequest[] }>(
+        '/api/public/storefront/admin/order-requests',
+      );
+      setAdminOrderRequests(normalizeAdminOrderRequests(json.requests));
+    } catch (err) {
+      setAdminOrderRequests([]);
+      if (showFailureAlert) {
+        showActionError('Order Requests Failed', err, 'Unable to load order requests');
+      } else {
+        showToast(err instanceof Error ? err.message : 'Unable to load order requests', 'error');
+      }
+    } finally {
+      setIsAdminOrderRequestsLoading(false);
+    }
+  };
+
+  const submitAdminOrderRequestDecision = async (
+    request: AdminOrderRequest,
+    decision: 'approve' | 'reject',
+  ) => {
+    if (!token || user?.role !== 'admin') {
+      return;
+    }
+    try {
+      setApprovingAdminOrderId(request.id);
+      const json = await storefrontApiRequest<{ request?: AdminOrderRequest }>(
+        `/api/public/storefront/admin/order-requests/${encodeURIComponent(request.id)}/${decision}`,
+        {
+          method: 'POST',
+        },
+      );
+      const approvedRequest = json.request ? normalizeAdminOrderRequest(json.request) : null;
+      setAdminOrderRequests(prev =>
+        prev.map(entry =>
+          entry.id === request.id
+            ? approvedRequest || {
+                ...entry,
+                invoiceApprovalStatus: decision === 'approve' ? 'Approved' : 'Rejected',
+                invoiceApprovedAt: decision === 'approve' ? new Date().toISOString() : undefined,
+                invoiceRejectedAt: decision === 'reject' ? new Date().toISOString() : undefined,
+              }
+            : entry,
+        ),
+      );
+      showToast(
+        decision === 'approve'
+          ? `Invoice approved for ${formatDisplayOrderCode(request.orderNumber)}`
+          : `Invoice disapproved for ${formatDisplayOrderCode(request.orderNumber)}`,
+      );
+    } catch (err) {
+      showActionError(
+        decision === 'approve' ? 'Approve Request Failed' : 'Disapprove Request Failed',
+        err,
+        decision === 'approve' ? 'Unable to approve invoice request' : 'Unable to disapprove invoice request',
+      );
+    } finally {
+      setApprovingAdminOrderId(null);
+    }
+  };
+
+  const approveAdminOrderRequest = (request: AdminOrderRequest) => {
+    if (request.invoiceApprovalStatus === 'Approved') {
+      showToast('Invoice is already approved');
+      return;
+    }
+    Alert.alert(
+      'Approve Invoice',
+      `Make ${formatDisplayOrderCode(request.orderNumber)} invoice visible to the customer?`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Approve',
+          onPress: () => {
+            void submitAdminOrderRequestDecision(request, 'approve');
+          },
+        },
+      ],
+    );
+  };
+
+  const rejectAdminOrderRequest = (request: AdminOrderRequest) => {
+    if (request.invoiceApprovalStatus === 'Rejected') {
+      showToast('Invoice is already disapproved');
+      return;
+    }
+    Alert.alert(
+      'Disapprove Invoice',
+      `Disapprove ${formatDisplayOrderCode(request.orderNumber)} invoice request for this customer?`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Disapprove',
+          style: 'destructive',
+          onPress: () => {
+            void submitAdminOrderRequestDecision(request, 'reject');
+          },
+        },
+      ],
+    );
   };
 
   const saveSellerBillingSettings = async () => {
@@ -1941,6 +2124,15 @@ function MainApp() {
   };
 
   const downloadInvoiceForOrder = async (order: ProfileOrder) => {
+    if (order.invoiceApprovalStatus !== 'Approved') {
+      showToast(
+        order.invoiceApprovalStatus === 'Rejected'
+          ? 'Invoice request was disapproved by admin'
+          : 'Invoice is awaiting admin approval',
+        'error',
+      );
+      return;
+    }
     if (!order.invoice) {
       showToast('Invoice is not available for this order yet', 'error');
       return;
@@ -1953,8 +2145,15 @@ function MainApp() {
       if (!response.downloadUrl) {
         throw new Error('Invoice download link is unavailable');
       }
-      await Linking.openURL(response.downloadUrl);
-      showToast(`${response.invoiceNumber || order.invoice.invoiceNumber} opened for download`);
+      const invoiceNumber = String(response.invoiceNumber || order.invoice.invoiceNumber || '').trim();
+      const targetFileName = toInvoicePdfFileName(invoiceNumber, order.id);
+      if (Platform.OS === 'android' && isDocumentDownloaderAvailable()) {
+        const savedInvoice = await downloadDocumentToDevice(response.downloadUrl, targetFileName, 'application/pdf');
+        showToast(`${savedInvoice.fileName || targetFileName} saved to ${savedInvoice.savedIn || 'device storage'}`);
+      } else {
+        await Linking.openURL(response.downloadUrl);
+        showToast(`${invoiceNumber || order.id} opened for download`);
+      }
     } catch (err) {
       Alert.alert('Invoice Download Failed', err instanceof Error ? err.message : 'Unable to download invoice');
     } finally {
@@ -2171,10 +2370,11 @@ function MainApp() {
     }
   };
 
-  const openProductDetail = async (productId: string) => {
+  const openProductDetail = async (productId: string, preferredCapacity?: string | null) => {
     try {
       setIsPublicDetailLoading(true);
       setError(null);
+      pendingProductDetailCapacityRef.current = typeof preferredCapacity === 'string' ? preferredCapacity.trim() || null : null;
       const detailUrl = `${API_BASE}/api/public/products/${productId}`;
       let res: Response;
       try {
@@ -2705,7 +2905,10 @@ function MainApp() {
 
         const parsedUser = JSON.parse(savedUserRaw);
         const role =
-          parsedUser?.role === 'admin' || parsedUser?.role === 'manager' || parsedUser?.role === 'staff'
+          parsedUser?.role === 'admin' ||
+          parsedUser?.role === 'manager' ||
+          parsedUser?.role === 'staff' ||
+          parsedUser?.role === 'customer'
             ? parsedUser.role
             : null;
         if (!role || !parsedUser?.id || !parsedUser?.username || !parsedUser?.name) {
@@ -2858,10 +3061,16 @@ function MainApp() {
     if (isAdminUser) {
       return;
     }
+    if (activeProfilePanel === 'orderRequests' || activeProfilePanel === 'seller' || activeProfilePanel === 'apiHealth') {
+      setActiveProfilePanel(null);
+    }
+    setAdminOrderRequests([]);
+    setIsAdminOrderRequestsLoading(false);
+    setApprovingAdminOrderId(null);
     setAdminApiHealth(null);
     setAdminApiHealthError(null);
     setIsAdminApiHealthLoading(false);
-  }, [isAdminUser]);
+  }, [activeProfilePanel, isAdminUser]);
   useEffect(() => {
     if (!user) return;
     setProfileName(user.name || 'Piyush Sharma');
@@ -2880,13 +3089,29 @@ function MainApp() {
   }, []);
   useEffect(() => {
     if (selectedProduct) {
+      const preferredCapacity = pendingProductDetailCapacityRef.current;
       const availableCaps = getAvailableCapacities(selectedProduct);
+      if (preferredCapacity) {
+        if (availableCaps.includes(preferredCapacity)) {
+          setSelectedCapacity(preferredCapacity);
+          pendingProductDetailCapacityRef.current = null;
+          return;
+        }
+        const allCaps = getCapacityOptions(selectedProduct);
+        if (allCaps.includes(preferredCapacity)) {
+          setSelectedCapacity(preferredCapacity);
+          pendingProductDetailCapacityRef.current = null;
+          return;
+        }
+      }
       if (availableCaps.length > 0) {
         setSelectedCapacity(availableCaps[0]);
+        pendingProductDetailCapacityRef.current = null;
         return;
       }
       const caps = getCapacityOptions(selectedProduct);
       setSelectedCapacity(caps[0]);
+      pendingProductDetailCapacityRef.current = null;
     }
   }, [selectedProduct]);
   useEffect(() => {
@@ -3696,6 +3921,7 @@ function MainApp() {
     if (activeProfilePanel === 'installation') return 'Installation Requests';
     if (activeProfilePanel === 'warranty') return 'Warranty Claims';
     if (activeProfilePanel === 'language') return 'Language';
+    if (activeProfilePanel === 'orderRequests') return 'Order Requests';
     if (activeProfilePanel === 'seller') return 'Seller Billing';
     if (activeProfilePanel === 'apiHealth') return 'API Health Check';
     return 'Profile';
@@ -3774,15 +4000,25 @@ function MainApp() {
     [orderDetailPalette.border, orderDetailPalette.surfaceSoft],
   );
   const selectedOrderStatusMeta = useMemo(() => {
-    const normalized = String(selectedInvoiceOrder?.status || '').trim().toLowerCase();
-    if (normalized === 'cancelled') {
+    const displayStatus = getOrderDisplayStatus(selectedInvoiceOrder);
+    if (displayStatus === 'Cancelled') {
       return { label: 'Order Cancelled', bg: profileDarkMode ? '#3A1D1D' : '#FEE2E2', text: '#B91C1C', icon: '!' };
     }
-    if (normalized === 'delivered') {
+    if (displayStatus === 'Delivered') {
       return { label: 'Delivered', bg: profileDarkMode ? '#183526' : '#E9F7EF', text: '#2F6B43', icon: '✓' };
     }
-    return { label: 'Order Confirmed', bg: orderDetailPalette.successBg, text: orderDetailPalette.successText, icon: '✓' };
-  }, [orderDetailPalette.successBg, orderDetailPalette.successText, profileDarkMode, selectedInvoiceOrder]);
+    if (displayStatus === 'Success') {
+      return { label: 'Success', bg: orderDetailPalette.successBg, text: orderDetailPalette.successText, icon: '✓' };
+    }
+    return { label: 'Processing', bg: orderDetailPalette.accentBg, text: orderDetailPalette.accentText, icon: '⏳' };
+  }, [
+    orderDetailPalette.accentBg,
+    orderDetailPalette.accentText,
+    orderDetailPalette.successBg,
+    orderDetailPalette.successText,
+    profileDarkMode,
+    selectedInvoiceOrder,
+  ]);
   const landingSearchStickyHeaderIndices = useMemo(() => {
     if (publicView === 'feedback' || publicView === 'categories' || publicView === 'categoryProducts') {
       return [];
@@ -4266,6 +4502,14 @@ function MainApp() {
                 <>
                   <Text style={[styles.profileSectionTitle, { color: profileDarkMode ? '#E5E7EB' : '#111827' }]}>Admin Tools</Text>
                   <View style={[styles.profileSectionCard, { backgroundColor: profileDarkMode ? '#111827' : '#FFFFFF' }]}>
+                    <Pressable style={styles.profileMenuRow} onPress={() => openProfilePanel('orderRequests')}>
+                      <Text style={styles.profileMenuIcon}>📥</Text>
+                      <Text style={[styles.profileMenuLabel, { color: profileDarkMode ? '#F8FAFC' : '#111827' }]}>
+                        Order Requests
+                      </Text>
+                      <Text style={[styles.profileMenuArrow, { color: profileDarkMode ? '#94A3B8' : '#6B7280' }]}>›</Text>
+                    </Pressable>
+                    <View style={[styles.profileMenuDivider, { backgroundColor: profileDarkMode ? '#1F2937' : '#E5E7EB' }]} />
                     <Pressable style={styles.profileMenuRow} onPress={() => openProfilePanel('seller')}>
                       <Text style={styles.profileMenuIcon}>🧾</Text>
                       <Text style={[styles.profileMenuLabel, { color: profileDarkMode ? '#F8FAFC' : '#111827' }]}>
@@ -4380,28 +4624,44 @@ function MainApp() {
                     profileOrders.map(order => {
                       const orderItems = Array.isArray(order.items) ? order.items : [];
                       const primaryItem = orderItems[0] || null;
-                      const primaryItemTitle = String(primaryItem?.name || order.model || 'Order details unavailable').trim();
-                      const orderItemSummary = buildOrderItemMetaText(
+                      const extraOrderItems = orderItems.slice(1);
+                      const primaryItemTitle = String(primaryItem?.name || order.model || 'Order item').trim();
+                      const primaryItemMetaText = buildOrderItemMetaText(
                         primaryItemTitle,
                         primaryItem?.model,
                         primaryItem?.capacity,
                       );
-                      const extraItemsLabel =
-                        orderItems.length > 1
-                          ? `+${orderItems.length - 1} more item${orderItems.length - 1 === 1 ? '' : 's'}`
-                          : '';
                       const invoiceNumber = String(order.invoice?.invoiceNumber || '').trim();
                       const gstIncludedLabel =
                         order.invoice && Number(order.invoice.gstTotal || 0) > 0
                           ? `Incl. GST ${formatCurrency(order.invoice.gstTotal)}`
-                          : 'Invoice pending';
-                      const normalizedOrderStatus = String(order.status || '').trim().toLowerCase();
+                          : order.invoiceApprovalStatus === 'Approved'
+                            ? 'Invoice not available'
+                            : order.invoiceApprovalStatus === 'Rejected'
+                              ? 'Invoice request disapproved'
+                              : 'Awaiting admin approval';
+                      const displayOrderStatus = getOrderDisplayStatus(order);
+                      const normalizedOrderStatus = displayOrderStatus.trim().toLowerCase();
                       const orderStatusColor =
                         normalizedOrderStatus === 'cancelled'
                           ? orderDetailPalette.dangerText
                           : normalizedOrderStatus === 'delivered'
                             ? orderDetailPalette.successText
                             : orderDetailPalette.accentText;
+                      const invoiceStatusTextColor =
+                        order.invoiceApprovalStatus === 'Rejected'
+                          ? orderDetailPalette.dangerText
+                          : order.invoice
+                            ? orderDetailPalette.successText
+                            : orderDetailPalette.accentText;
+                      const orderSummaryLine = [
+                        primaryItemMetaText,
+                        extraOrderItems.length > 0
+                          ? `+${extraOrderItems.length} more item${extraOrderItems.length === 1 ? '' : 's'}`
+                          : `${order.itemCount} item${order.itemCount > 1 ? 's' : ''}`,
+                      ]
+                        .filter(Boolean)
+                        .join(' • ');
 
                       return (
                         <Pressable
@@ -4416,6 +4676,7 @@ function MainApp() {
                               borderRadius: 18,
                               paddingHorizontal: 10,
                               paddingVertical: 10,
+                              gap: 10,
                             },
                           ]}
                           onPress={() => openInvoiceForOrder(order)}
@@ -4437,21 +4698,64 @@ function MainApp() {
                               {primaryItemTitle}
                             </Text>
                             <Text style={[styles.profilePanelSub, { color: orderDetailPalette.subtext }]} numberOfLines={1}>
-                              {[orderItemSummary, extraItemsLabel || `${order.itemCount} item${order.itemCount > 1 ? 's' : ''}`]
-                                .filter(Boolean)
-                                .join(' • ')}
+                              {orderSummaryLine}
                             </Text>
                             <Text style={[styles.profileOrderMetaText, { color: orderDetailPalette.accentText }]}>
                               {invoiceNumber ? `${invoiceNumber} • ` : ''}
                               {formatDisplayDate(order.createdAt)}
                             </Text>
-                            <Text style={[styles.profileOrderTaxHint, { color: orderDetailPalette.successText }]}>{gstIncludedLabel}</Text>
+                            <Text style={[styles.profileOrderTaxHint, { color: invoiceStatusTextColor }]}>{gstIncludedLabel}</Text>
+
+                            {extraOrderItems.length > 0 ? (
+                              <View
+                                style={[
+                                  styles.profileOrderExtraItems,
+                                  {
+                                    backgroundColor: orderDetailPalette.surface,
+                                    borderColor: orderDetailPalette.border,
+                                  },
+                                ]}
+                              >
+                                <Text style={[styles.profileOrderSectionLabel, { color: orderDetailPalette.subtext }]}>
+                                  More items
+                                </Text>
+                                {extraOrderItems.map((item, itemIndex) => {
+                                  const itemLineTotal = Number(item.lineTotal || (item.unitPrice || 0) * item.qty);
+                                  return (
+                                    <View
+                                      key={item.id}
+                                      style={[
+                                        styles.profileOrderExtraItemRow,
+                                        itemIndex > 0
+                                          ? {
+                                              borderTopWidth: 1,
+                                              borderTopColor: orderDetailPalette.border,
+                                            }
+                                          : null,
+                                      ]}
+                                    >
+                                      <Text
+                                        style={[styles.profileOrderExtraItemName, { color: orderDetailPalette.title }]}
+                                        numberOfLines={1}
+                                      >
+                                        {item.name}
+                                      </Text>
+                                      <Text
+                                        style={[styles.profileOrderExtraItemAmount, { color: orderDetailPalette.title }]}
+                                      >
+                                        {formatCurrency(itemLineTotal)}
+                                      </Text>
+                                    </View>
+                                  );
+                                })}
+                              </View>
+                            ) : null}
                           </View>
                           <View style={styles.profileOrderAside}>
                             <Text style={[styles.profilePanelAmount, { color: orderDetailPalette.title }]}>
                               {formatCurrency(order.total)}
                             </Text>
-                            <Text style={[styles.profilePanelStatus, { color: orderStatusColor }]}>{order.status}</Text>
+                            <Text style={[styles.profilePanelStatus, { color: orderStatusColor }]}>{displayOrderStatus}</Text>
                             <Text style={[styles.profilePanelLink, { color: orderDetailPalette.buttonBg }]}>Open Details</Text>
                           </View>
                         </Pressable>
@@ -4476,23 +4780,24 @@ function MainApp() {
                   ) : (
                     wishlistProducts.map(product => (
                       <View key={product.id} style={styles.profileWishlistRow}>
-                        <Image source={{ uri: product.thumbnail }} style={styles.profileWishlistImage} />
-                        <View style={{ flex: 1 }}>
-                          <Text style={[styles.profilePanelMain, { color: orderDetailPalette.title }]} numberOfLines={1}>
-                            {product.name}
-                          </Text>
-                          <Text style={[styles.profilePanelSub, { color: orderDetailPalette.subtext }]} numberOfLines={1}>
-                            {product.model}
-                          </Text>
-                        </View>
                         <Pressable
+                          style={{ flex: 1, flexDirection: 'row', alignItems: 'center', gap: 12 }}
                           onPress={() => {
                             setActiveProfilePanel(null);
                             closeProfileModal();
                             openProductDetail(product.id);
                           }}
                         >
-                          <Text style={[styles.profilePanelLink, { color: orderDetailPalette.buttonBg }]}>Open</Text>
+                          <Image source={{ uri: product.thumbnail }} style={styles.profileWishlistImage} />
+                          <View style={{ flex: 1 }}>
+                            <Text style={[styles.profilePanelMain, { color: orderDetailPalette.title }]} numberOfLines={1}>
+                              {product.name}
+                            </Text>
+                            <Text style={[styles.profilePanelSub, { color: orderDetailPalette.subtext }]} numberOfLines={1}>
+                              {product.model}
+                            </Text>
+                            <Text style={[styles.profilePanelLink, { color: orderDetailPalette.buttonBg }]}>Open Details</Text>
+                          </View>
                         </Pressable>
                         <Pressable onPress={() => toggleWishlist(product.id)}>
                           <Text style={[styles.profilePanelLinkDanger, { color: orderDetailPalette.dangerText }]}>Remove</Text>
@@ -4544,6 +4849,191 @@ function MainApp() {
                   >
                     <Text style={styles.profilePanelPrimaryText}>Add UPI Method</Text>
                   </Pressable>
+                </View>
+              ) : null}
+
+              {activeProfilePanel === 'orderRequests' ? (
+                <View
+                  style={[
+                    styles.profilePanelCard,
+                    {
+                      backgroundColor: orderDetailPalette.surface,
+                      borderColor: orderDetailPalette.border,
+                      gap: 12,
+                    },
+                  ]}
+                >
+                  <View
+                    style={[
+                      {
+                        borderRadius: 14,
+                        borderWidth: 1,
+                        borderColor: orderDetailPalette.border,
+                        backgroundColor: orderDetailPalette.surfaceSoft,
+                        padding: 12,
+                        gap: 4,
+                      },
+                    ]}
+                  >
+                    <Text style={[styles.profilePanelMain, { color: orderDetailPalette.title }]}>Invoice Approval Requests</Text>
+                    <Text style={[styles.profilePanelSub, { color: orderDetailPalette.subtext }]}>
+                      Storefront orders create requests automatically. From here admin can approve or disapprove them.
+                      Customers can open the invoice only after approval.
+                    </Text>
+                    <Text style={[styles.profilePanelSub, { color: orderDetailPalette.accentText }]}>
+                      Pending approvals: {adminOrderRequests.filter(request => request.invoiceApprovalStatus === 'Pending').length}
+                    </Text>
+                  </View>
+
+                  {isAdminOrderRequestsLoading ? (
+                    <View style={{ paddingVertical: 22, alignItems: 'center', justifyContent: 'center', gap: 10 }}>
+                      <ActivityIndicator color={orderDetailPalette.buttonBg} />
+                      <Text style={[styles.profilePanelSub, { color: orderDetailPalette.subtext }]}>
+                        Loading order requests...
+                      </Text>
+                    </View>
+                  ) : adminOrderRequests.length === 0 ? (
+                    <Text style={[styles.profilePanelEmpty, { color: orderDetailPalette.subtext }]}>
+                      No invoice approval requests available.
+                    </Text>
+                  ) : (
+                    adminOrderRequests.map(request => {
+                      const isPending = request.invoiceApprovalStatus === 'Pending';
+                      const isApproved = request.invoiceApprovalStatus === 'Approved';
+                      const isRejected = request.invoiceApprovalStatus === 'Rejected';
+                      return (
+                        <View
+                          key={request.id}
+                          style={[
+                            {
+                              borderRadius: 16,
+                              borderWidth: 1,
+                              borderColor: orderDetailPalette.border,
+                              backgroundColor: orderDetailPalette.surfaceSoft,
+                              padding: 12,
+                              gap: 8,
+                            },
+                          ]}
+                        >
+                          <View style={[styles.profilePanelRow, { alignItems: 'center' }]}>
+                            <View style={{ flex: 1, gap: 4 }}>
+                              <Text style={[styles.profilePanelMain, { color: orderDetailPalette.title }]}>
+                                {formatDisplayOrderCode(request.orderNumber)}
+                              </Text>
+                              <Text style={[styles.profilePanelSub, { color: orderDetailPalette.text }]}>
+                                {request.customerName}
+                              </Text>
+                            </View>
+                            <View
+                              style={{
+                                borderRadius: 999,
+                                paddingHorizontal: 12,
+                                paddingVertical: 6,
+                                backgroundColor: isPending
+                                  ? orderDetailPalette.accentBg
+                                  : isRejected
+                                    ? '#FEE2E2'
+                                    : orderDetailPalette.successBg,
+                              }}
+                            >
+                              <Text
+                                style={[
+                                  styles.profilePanelSub,
+                                  {
+                                    color: isPending
+                                      ? orderDetailPalette.accentText
+                                      : isRejected
+                                        ? orderDetailPalette.dangerText
+                                        : orderDetailPalette.successText,
+                                  },
+                                ]}
+                              >
+                                {request.invoiceApprovalStatus}
+                              </Text>
+                            </View>
+                          </View>
+
+                          <Text style={[styles.profilePanelSub, { color: orderDetailPalette.subtext }]}>
+                            {request.itemCount} item{request.itemCount === 1 ? '' : 's'} • {formatCurrency(request.total)}
+                          </Text>
+                          <Text style={[styles.profilePanelSub, { color: orderDetailPalette.subtext }]}>
+                            Placed: {formatProfileDateTime(request.placedAt)}
+                          </Text>
+                          <Text style={[styles.profilePanelSub, { color: orderDetailPalette.subtext }]}>
+                            Requested: {formatProfileDateTime(request.invoiceRequestedAt || request.placedAt)}
+                          </Text>
+                          {request.invoiceNumber ? (
+                            <Text style={[styles.profilePanelSub, { color: orderDetailPalette.accentText }]}>
+                              Invoice: {request.invoiceNumber}
+                            </Text>
+                          ) : null}
+                          {request.customerEmail ? (
+                            <Text style={[styles.profilePanelSub, { color: orderDetailPalette.subtext }]}>
+                              Email: {request.customerEmail}
+                            </Text>
+                          ) : null}
+                          {request.customerPhone ? (
+                            <Text style={[styles.profilePanelSub, { color: orderDetailPalette.subtext }]}>
+                              Phone: {request.customerPhone}
+                            </Text>
+                          ) : null}
+                          {request.invoiceApprovedAt ? (
+                            <Text style={[styles.profilePanelSub, { color: orderDetailPalette.successText }]}>
+                              Approved: {formatProfileDateTime(request.invoiceApprovedAt)}
+                            </Text>
+                          ) : null}
+                          {request.invoiceRejectedAt ? (
+                            <Text style={[styles.profilePanelSub, { color: orderDetailPalette.dangerText }]}>
+                              Disapproved: {formatProfileDateTime(request.invoiceRejectedAt)}
+                            </Text>
+                          ) : null}
+
+                          <View style={{ flexDirection: 'row', gap: 10 }}>
+                            <Pressable
+                              style={[
+                                styles.profilePanelPrimaryBtn,
+                                {
+                                  flex: 1,
+                                  backgroundColor: isApproved ? orderDetailPalette.border : orderDetailPalette.buttonBg,
+                                  opacity: approvingAdminOrderId === request.id ? 0.7 : 1,
+                                },
+                              ]}
+                              onPress={() => approveAdminOrderRequest(request)}
+                              disabled={isApproved || approvingAdminOrderId === request.id}
+                            >
+                              <Text style={styles.profilePanelPrimaryText}>
+                                {approvingAdminOrderId === request.id
+                                  ? 'Saving...'
+                                  : isApproved
+                                    ? 'Approved'
+                                    : 'Approve'}
+                              </Text>
+                            </Pressable>
+                            <Pressable
+                              style={[
+                                styles.profilePanelPrimaryBtn,
+                                {
+                                  flex: 1,
+                                  backgroundColor: isRejected ? '#FCA5A5' : '#DC2626',
+                                  opacity: approvingAdminOrderId === request.id ? 0.7 : 1,
+                                },
+                              ]}
+                              onPress={() => rejectAdminOrderRequest(request)}
+                              disabled={isRejected || approvingAdminOrderId === request.id}
+                            >
+                              <Text style={styles.profilePanelPrimaryText}>
+                                {approvingAdminOrderId === request.id
+                                  ? 'Saving...'
+                                  : isRejected
+                                    ? 'Disapproved'
+                                    : 'Disapprove'}
+                              </Text>
+                            </Pressable>
+                          </View>
+                        </View>
+                      );
+                    })
+                  )}
                 </View>
               ) : null}
 
@@ -5277,6 +5767,33 @@ function MainApp() {
                     {selectedInvoice?.invoiceNumber ? ` • ${selectedInvoice.invoiceNumber}` : ''}
                   </Text>
                 </View>
+
+                {selectedInvoiceOrder.invoiceApprovalStatus !== 'Approved' ? (
+                  <View
+                    style={[
+                      styles.orderDetailCard,
+                      { backgroundColor: orderDetailPalette.surfaceSoft, borderColor: orderDetailPalette.border },
+                    ]}
+                  >
+                    <Text style={[styles.orderDetailSectionTitle, { color: orderDetailPalette.title }]}>
+                      {selectedInvoiceOrder.invoiceApprovalStatus === 'Rejected'
+                        ? 'Invoice Request Disapproved'
+                        : 'Invoice Approval Pending'}
+                    </Text>
+                    <Text style={[styles.orderDetailNoteText, { color: orderDetailPalette.text }]}>
+                      {selectedInvoiceOrder.invoiceApprovalStatus === 'Rejected'
+                        ? 'This invoice request was disapproved by admin. The invoice is not available for viewing or download.'
+                        : 'Your order is created successfully. The invoice will appear here after admin approves the request.'}
+                    </Text>
+                    <Text style={[styles.orderDetailNoteSubtext, { color: orderDetailPalette.subtext }]}>
+                      {selectedInvoiceOrder.invoiceApprovalStatus === 'Rejected'
+                        ? `Disapproved: ${formatProfileDateTime(selectedInvoiceOrder.invoiceRejectedAt)}`
+                        : `Requested: ${formatProfileDateTime(
+                            selectedInvoiceOrder.invoiceRequestedAt || selectedInvoiceOrder.createdAt,
+                          )}`}
+                    </Text>
+                  </View>
+                ) : null}
 
                 <View
                   style={[
@@ -6258,6 +6775,19 @@ function MainApp() {
                     <Text style={styles.checkoutSuccessBtnText}>View Tax Invoice</Text>
                   </Pressable>
                 </View>
+              ) : isOrderPlaced && lastPlacedOrder ? (
+                <View style={styles.checkoutSuccessCard}>
+                  <Text style={styles.checkoutSuccessTitle}>Order request sent for invoice approval</Text>
+                  <Text style={styles.checkoutSuccessSub}>
+                    {formatDisplayOrderCode(lastPlacedOrder.orderNumber)} was created successfully.
+                  </Text>
+                  <Text style={styles.checkoutSuccessSub}>
+                    The invoice will appear in your orders after admin verifies and approves this request.
+                  </Text>
+                  <Pressable style={styles.checkoutSuccessBtn} onPress={() => openInvoiceForOrder(lastPlacedOrder)}>
+                    <Text style={styles.checkoutSuccessBtnText}>View Order Details</Text>
+                  </Pressable>
+                </View>
               ) : null}
               {cartItems.length === 0 ? (
                 <View style={[styles.checkoutEmptyState, { backgroundColor: theme.panel, borderColor: theme.steel }]}>
@@ -6302,6 +6832,9 @@ function MainApp() {
                               <Text style={[styles.checkoutLinePrice, { color: theme.text }]}>₹{(item.unitPrice * item.qty).toLocaleString()}</Text>
                             </View>
                             <View style={styles.checkoutLineRight}>
+                              <Pressable onPress={() => openProductDetail(item.productId, item.capacity)}>
+                                <Text style={[styles.checkoutRemoveLink, { color: theme.accent }]}>View Details</Text>
+                              </Pressable>
                               <Pressable onPress={() => removeCartItem(item.id)}>
                                 <Text style={[styles.checkoutRemoveLink, { color: theme.subtext }]}>Remove</Text>
                               </Pressable>
