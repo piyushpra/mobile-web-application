@@ -229,6 +229,7 @@ function sanitizePublicReleaseNotes(value: string) {
         )
         .replace(/\b[a-f0-9]{7,40}\b/gi, '')
         .replace(/\b(?:debug|internal|staging|qa)\b/gi, '')
+        .replace(/(?:\(\s*\)|\[\s*\]|\{\s*\})/g, ' ')
         .replace(/\s{2,}/g, ' ')
         .replace(/^[,;:|)\]-\s]+/, '')
         .replace(/[,;:|(\[-\s]+$/, '')
@@ -770,6 +771,7 @@ function MainApp() {
   const [forgotUsername, setForgotUsername] = useState('');
   const [authMode, setAuthMode] = useState<AuthMode>('none');
   const [isAuthModalVisible, setIsAuthModalVisible] = useState(false);
+  const [authEntryMessage, setAuthEntryMessage] = useState('');
   const [publicView, setPublicView] = useState<PublicView>('landing');
   const [landingCategory, setLandingCategory] = useState<LandingCategory>('inverters');
 
@@ -778,6 +780,7 @@ function MainApp() {
   const [publicProducts, setPublicProducts] = useState<PublicProduct[]>([]);
   const [selectedProduct, setSelectedProduct] = useState<PublicProductDetail | null>(null);
   const [isDetailModalVisible, setIsDetailModalVisible] = useState(false);
+  const [selectedProductImageIndex, setSelectedProductImageIndex] = useState(0);
   const [isViewMoreModalVisible, setIsViewMoreModalVisible] = useState(false);
   const [viewMoreContext, setViewMoreContext] = useState<ViewMoreContext>('all');
   const [isLocationModalVisible, setIsLocationModalVisible] = useState(false);
@@ -820,6 +823,7 @@ function MainApp() {
   const [profileLanguage, setProfileLanguage] = useState<'English' | 'Hindi'>('English');
   const [wishlistIds, setWishlistIds] = useState<string[]>([]);
   const [profileOrders, setProfileOrders] = useState<ProfileOrder[]>([]);
+  const [expandedProfileOrderIds, setExpandedProfileOrderIds] = useState<string[]>([]);
   const [selectedInvoiceOrder, setSelectedInvoiceOrder] = useState<ProfileOrder | null>(null);
   const [lastPlacedOrderId, setLastPlacedOrderId] = useState<string | null>(null);
   const [invoiceDownloadOrderId, setInvoiceDownloadOrderId] = useState<string | null>(null);
@@ -923,6 +927,7 @@ function MainApp() {
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pendingProductDetailCapacityRef = useRef<string | null>(null);
   const guestIdRef = useRef(`gst_${Math.random().toString(36).slice(2, 10)}`);
+  const publicViewHistoryRef = useRef<PublicView[]>(['landing']);
   const lastAddActionRef = useRef<{ id: string; ts: number } | null>(null);
   const addActionLockRef = useRef(false);
   const skipNextCartSyncRef = useRef(true);
@@ -1318,12 +1323,47 @@ function MainApp() {
 
   const getAuthSlideOffset = (mode: AuthMode) => (mode === 'register' ? -18 : 18);
 
-  const openAuthModal = (mode: 'login' | 'register' | 'forgot') => {
+  const openAuthModal = (mode: 'login' | 'register' | 'forgot', entryMessage = '') => {
     setAuthMode(mode);
+    setAuthEntryMessage(mode === 'login' ? String(entryMessage || '').trim() : '');
     authFormOpacity.setValue(1);
     authFormSlide.setValue(0);
     setIsAuthModalVisible(true);
   };
+
+  const navigatePublicView = React.useCallback(
+    (nextView: PublicView, options?: { reset?: boolean; replace?: boolean }) => {
+      const normalizedView = String(nextView || 'landing') as PublicView;
+      if (options?.reset) {
+        publicViewHistoryRef.current = [normalizedView];
+        setPublicView(normalizedView);
+        return;
+      }
+
+      const currentHistory = publicViewHistoryRef.current;
+      const currentView = currentHistory[currentHistory.length - 1] || 'landing';
+      if (options?.replace) {
+        publicViewHistoryRef.current = [...currentHistory.slice(0, -1), normalizedView];
+      } else if (currentView !== normalizedView) {
+        publicViewHistoryRef.current = [...currentHistory, normalizedView];
+      }
+      setPublicView(normalizedView);
+    },
+    [],
+  );
+
+  const goBackPublicView = React.useCallback((fallbackView: PublicView = 'landing') => {
+    const currentHistory = publicViewHistoryRef.current;
+    if (currentHistory.length > 1) {
+      const nextHistory = currentHistory.slice(0, -1);
+      publicViewHistoryRef.current = nextHistory;
+      setPublicView(nextHistory[nextHistory.length - 1] || fallbackView);
+      return;
+    }
+
+    publicViewHistoryRef.current = [fallbackView];
+    setPublicView(fallbackView);
+  }, []);
 
   const switchAuthMode = (mode: 'login' | 'register' | 'forgot') => {
     if (authMode === mode) {
@@ -1335,6 +1375,9 @@ function MainApp() {
       Animated.timing(authFormSlide, { toValue: nextSlideOffset, duration: 120, easing: Easing.out(Easing.cubic), useNativeDriver: true }),
     ]).start(() => {
       setAuthMode(mode);
+      if (mode !== 'login') {
+        setAuthEntryMessage('');
+      }
       authFormSlide.setValue(-nextSlideOffset);
       Animated.parallel([
         Animated.timing(authFormOpacity, { toValue: 1, duration: 180, easing: Easing.out(Easing.cubic), useNativeDriver: true }),
@@ -1345,6 +1388,7 @@ function MainApp() {
 
   const closeAuthModal = () => {
     setIsAuthModalVisible(false);
+    setAuthEntryMessage('');
   };
 
   const openViewMoreModal = (context: ViewMoreContext) => {
@@ -1368,9 +1412,15 @@ function MainApp() {
     setIsPublicSearchModalVisible(false);
   };
 
+  const openPublicSearchFromDetail = () => {
+    setIsDetailModalVisible(false);
+    setIsPublicSearchModalVisible(true);
+  };
+
   const closeProfileModal = () => {
     setIsProfileModalVisible(false);
     setActiveProfilePanel(null);
+    setExpandedProfileOrderIds([]);
     setSelectedInvoiceOrder(null);
   };
 
@@ -1440,8 +1490,7 @@ function MainApp() {
 
   const toggleWishlist = async (productId: string) => {
     if (!token || !user) {
-      Alert.alert('Login Required', 'Please login to save wishlist items to your account.');
-      openAuthModal('login');
+      openAuthModal('login', 'Please login first to add this item to your wishlist.');
       return;
     }
 
@@ -1743,7 +1792,7 @@ function MainApp() {
     setIsProfileEditModalVisible(false);
     setIsProfileModalVisible(false);
     setActiveProfilePanel(null);
-    setPublicView('feedback');
+    navigatePublicView('feedback');
   };
 
   const openContactSupport = () => {
@@ -2123,6 +2172,16 @@ function MainApp() {
     setSelectedInvoiceOrder(normalizeProfileOrder(order));
   };
 
+  const toggleProfileOrderItems = (orderId: string) => {
+    const normalizedOrderId = String(orderId || '').trim();
+    if (!normalizedOrderId) {
+      return;
+    }
+    setExpandedProfileOrderIds(prev =>
+      prev.includes(normalizedOrderId) ? prev.filter(id => id !== normalizedOrderId) : [...prev, normalizedOrderId],
+    );
+  };
+
   const downloadInvoiceForOrder = async (order: ProfileOrder) => {
     if (order.invoiceApprovalStatus !== 'Approved') {
       showToast(
@@ -2149,7 +2208,10 @@ function MainApp() {
       const targetFileName = toInvoicePdfFileName(invoiceNumber, order.id);
       if (Platform.OS === 'android' && isDocumentDownloaderAvailable()) {
         const savedInvoice = await downloadDocumentToDevice(response.downloadUrl, targetFileName, 'application/pdf');
-        showToast(`${savedInvoice.fileName || targetFileName} saved to ${savedInvoice.savedIn || 'device storage'}`);
+        const savedFileName = savedInvoice.fileName || targetFileName;
+        const savedInLabel = savedInvoice.savedIn || 'device storage';
+        showToast(`${savedFileName} saved to ${savedInLabel}`);
+        Alert.alert('Invoice Downloaded', `${savedFileName} has been saved to ${savedInLabel}.`);
       } else {
         await Linking.openURL(response.downloadUrl);
         showToast(`${invoiceNumber || order.id} opened for download`);
@@ -2186,7 +2248,7 @@ function MainApp() {
       setFeedbackMessage('');
       setFeedbackRating(4);
       setSelectedFeedbackOrderItemId(selectedOrderItem.orderItemId);
-      setPublicView('landing');
+      navigatePublicView('landing', { reset: true });
     } catch (err) {
       Alert.alert('Feedback Failed', err instanceof Error ? err.message : 'Unable to submit feedback');
     }
@@ -2877,7 +2939,7 @@ function MainApp() {
 
     try {
       setIsPageRefreshing(true);
-      if (isAdminUser) {
+      if (isAdminUser && !isHomeModuleForAdmin) {
         await loadAll();
         return;
       }
@@ -2888,10 +2950,36 @@ function MainApp() {
         loadLocationProfile(),
         ...(publicView === 'feedback' ? [loadFeedbackOrderItems()] : []),
       ]);
+
+      if (isLocationModalVisible && locationSearch.trim().length > 0) {
+        await loadSearchedLocations(locationSearch);
+      }
+      if (isDetailModalVisible && selectedProduct?.id) {
+        await openProductDetail(selectedProduct.id, selectedCapacity);
+      }
+      if (isAdminUser && activeProfilePanel === 'orderRequests') {
+        await loadAdminOrderRequests();
+      } else if (isAdminUser && activeProfilePanel === 'seller') {
+        await loadSellerBillingSettings();
+      } else if (isAdminUser && activeProfilePanel === 'apiHealth') {
+        await loadAdminApiHealth();
+      }
     } finally {
       setIsPageRefreshing(false);
     }
   };
+
+  const renderPageRefreshControl = (progressBackgroundColor = theme.panel) => (
+    <RefreshControl
+      refreshing={isPageRefreshing}
+      onRefresh={() => {
+        void refreshCurrentPage();
+      }}
+      tintColor={theme.primary}
+      colors={[theme.primary]}
+      progressBackgroundColor={progressBackgroundColor}
+    />
+  );
 
   useEffect(() => {
     let isMounted = true;
@@ -3115,6 +3203,26 @@ function MainApp() {
     }
   }, [selectedProduct]);
   useEffect(() => {
+    setSelectedProductImageIndex(0);
+  }, [selectedProduct?.id]);
+  useEffect(() => {
+    if (!selectedInvoiceOrder) {
+      return;
+    }
+    const latestOrder = profileOrders.find(order => order.id === selectedInvoiceOrder.id);
+    if (!latestOrder) {
+      return;
+    }
+    setSelectedInvoiceOrder(normalizeProfileOrder(latestOrder));
+  }, [profileOrders, selectedInvoiceOrder?.id]);
+  useEffect(() => {
+    const currentHistory = publicViewHistoryRef.current;
+    const currentView = currentHistory[currentHistory.length - 1];
+    if (currentView !== publicView) {
+      publicViewHistoryRef.current = [publicView];
+    }
+  }, [publicView]);
+  useEffect(() => {
     if (isLocationModalVisible) {
       setDraftDeliveryLocation(currentDeliveryLocation);
       setShowMoreSuggestedLocations(false);
@@ -3153,6 +3261,7 @@ function MainApp() {
       }
       setIsAuthModalVisible(false);
       setAuthMode('none');
+      setAuthEntryMessage('');
       showToast('Login successful');
     } catch (err) {
       showActionError('Login Failed', err, 'Login failed');
@@ -3228,7 +3337,7 @@ function MainApp() {
     setIsItemEditModalVisible(false);
     setIsCheckoutSheetVisible(false);
     setIsOrderPlaced(false);
-    setPublicView('landing');
+    navigatePublicView('landing', { reset: true });
 
     try {
       if (token) {
@@ -3829,6 +3938,13 @@ function MainApp() {
   );
   const isSelectedProductBestseller = selectedProductTags.includes('bestseller');
   const isSelectedProductPremium = selectedProductTags.includes('premium');
+  const selectedProductImageUrls = useMemo(() => {
+    const normalizedImages = Array.isArray(selectedProduct?.images)
+      ? selectedProduct.images.map(image => String(image || '').trim()).filter(Boolean)
+      : [];
+    return Array.from(new Set(normalizedImages));
+  }, [selectedProduct]);
+  const selectedProductGalleryImages = selectedProductImageUrls.length > 0 ? selectedProductImageUrls : [''];
   const selectedProductFeatureChips = useMemo(
     () => [
       { icon: '≈', label: toFeatureChipLabel(selectedProduct?.technologyOption || 'Pure Sine Wave') },
@@ -3846,6 +3962,26 @@ function MainApp() {
         borderColor: isDarkMode ? '#334155' : 'rgba(255,255,255,0.65)',
       },
       circleIcon: { color: isDarkMode ? '#F8FAFC' : '#111827' },
+      imageCountPill: {
+        backgroundColor: isDarkMode ? 'rgba(15, 23, 42, 0.88)' : 'rgba(255,255,255,0.93)',
+        borderWidth: 1,
+        borderColor: isDarkMode ? '#334155' : 'rgba(255,255,255,0.65)',
+      },
+      imageCountText: { color: isDarkMode ? '#F8FAFC' : '#111827' },
+      imageDot: {
+        backgroundColor: isDarkMode ? 'rgba(148, 163, 184, 0.42)' : 'rgba(255,255,255,0.48)',
+        borderColor: isDarkMode ? 'rgba(226, 232, 240, 0.12)' : 'rgba(17, 24, 39, 0.08)',
+      },
+      imageDotActive: {
+        backgroundColor: isDarkMode ? '#F8FAFC' : '#FFFFFF',
+        borderColor: isDarkMode ? '#F8FAFC' : '#FFFFFF',
+      },
+      unavailableBanner: {
+        backgroundColor: isDarkMode ? 'rgba(127, 29, 29, 0.2)' : '#FEF2F2',
+        borderColor: isDarkMode ? '#7F1D1D' : '#FECACA',
+      },
+      unavailableTitle: { color: isDarkMode ? '#FCA5A5' : '#991B1B' },
+      unavailableText: { color: isDarkMode ? '#FECACA' : '#7F1D1D' },
       bestsellerTag: { backgroundColor: isDarkMode ? '#3F3414' : '#F4E6A7' },
       bestsellerTagText: { color: isDarkMode ? '#FDE68A' : '#7C5C06' },
       premiumPill: { backgroundColor: isDarkMode ? '#3F3414' : '#EEDC98' },
@@ -3905,6 +4041,7 @@ function MainApp() {
     () => selectedProductAvailableCapacities.includes(selectedCapacity),
     [selectedProductAvailableCapacities, selectedCapacity],
   );
+  const isSelectedProductUnavailable = selectedProductAvailableCapacities.length === 0;
   const wishlistProducts = useMemo(
     () => publicProducts.filter(product => wishlistIds.includes(product.id)),
     [publicProducts, wishlistIds],
@@ -4020,7 +4157,7 @@ function MainApp() {
     selectedInvoiceOrder,
   ]);
   const landingSearchStickyHeaderIndices = useMemo(() => {
-    if (publicView === 'feedback' || publicView === 'categories' || publicView === 'categoryProducts') {
+    if (publicView === 'feedback' || publicView === 'categories' || publicView === 'categoryProducts' || publicView === 'offers') {
       return [];
     }
     return [toast ? 3 : 2];
@@ -4064,17 +4201,7 @@ function MainApp() {
           removeClippedSubviews={false}
           keyboardShouldPersistTaps="always"
           stickyHeaderIndices={landingSearchStickyHeaderIndices}
-          refreshControl={
-            <RefreshControl
-              refreshing={isPageRefreshing}
-              onRefresh={() => {
-                void refreshCurrentPage();
-              }}
-              tintColor={theme.primary}
-              colors={[theme.primary]}
-              progressBackgroundColor={theme.panel}
-            />
-          }
+          refreshControl={renderPageRefreshControl(theme.panel)}
           contentContainerStyle={{
             paddingTop: Math.max(10, insets.top),
             paddingHorizontal: horizontalScreenPadding,
@@ -4141,14 +4268,14 @@ function MainApp() {
               message={feedbackMessage}
               setMessage={setFeedbackMessage}
               onSubmit={submitFeedback}
-              onBack={() => setPublicView('landing')}
+              onBack={() => goBackPublicView()}
               feedbackOrderItems={feedbackOrderItems}
               selectedFeedbackOrderItemId={selectedFeedbackOrderItemId}
               setSelectedFeedbackOrderItemId={setSelectedFeedbackOrderItemId}
               isFeedbackOrderItemsLoading={isFeedbackOrderItemsLoading}
             />
           ) : null}
-          {publicView !== 'feedback' && publicView !== 'categories' && publicView !== 'categoryProducts' ? (
+          {publicView !== 'feedback' && publicView !== 'categories' && publicView !== 'categoryProducts' && publicView !== 'offers' ? (
             <View style={[styles.locationSearchWrap, { backgroundColor: theme.panel }]}>
               <Pressable style={styles.locationRow} onPress={() => setIsLocationModalVisible(true)}>
                 <Text style={styles.locationPin}>📍</Text>
@@ -4167,7 +4294,7 @@ function MainApp() {
               </Pressable>
             </View>
           ) : null}
-          {publicView !== 'feedback' && publicView !== 'categories' && publicView !== 'categoryProducts' ? (
+          {publicView !== 'feedback' && publicView !== 'categories' && publicView !== 'categoryProducts' && publicView !== 'offers' ? (
             <View style={[styles.stickySearchWrap, { backgroundColor: theme.panel }]}>
               <Pressable
                 onPress={openPublicSearchModal}
@@ -4227,7 +4354,7 @@ function MainApp() {
                 <View style={styles.heroContent}>
                   <Text style={styles.heroTopText}>Reliable Power Backup Solutions</Text>
                   <Text style={styles.heroMain}>for Your Home & Office</Text>
-                  <Pressable style={styles.shopNowHeroBtn} onPress={() => setPublicView('list')}>
+                  <Pressable style={styles.shopNowHeroBtn} onPress={() => navigatePublicView('list')}>
                     <Text style={styles.shopNowHeroText}>Shop Now</Text>
                   </Pressable>
                 </View>
@@ -4254,7 +4381,8 @@ function MainApp() {
               key={`public_sections_${publicView}`}
               theme={theme}
               publicView={publicView}
-              setPublicView={setPublicView}
+              setPublicView={navigatePublicView}
+              goBackPublicView={goBackPublicView}
               openViewMoreModal={openViewMoreModal}
               categoryCards={categoryCards}
               landingCategory={landingCategory}
@@ -4280,7 +4408,7 @@ function MainApp() {
           <PublicFooter
             theme={theme}
             publicView={publicView}
-            setPublicView={setPublicView}
+            setPublicView={navigatePublicView}
             continueCheckout={continueCheckout}
             cartItemCount={cartItemCount}
             isCheckoutSheetVisible={isCheckoutSheetVisible}
@@ -4415,7 +4543,11 @@ function MainApp() {
               )}
             </View>
 
-            <ScrollView removeClippedSubviews contentContainerStyle={styles.profileContent}>
+            <ScrollView
+              removeClippedSubviews
+              refreshControl={renderPageRefreshControl(profileDarkMode ? '#0F172A' : '#FFFFFF')}
+              contentContainerStyle={styles.profileContent}
+            >
               <View style={[styles.profileUserCard, { backgroundColor: profileDarkMode ? '#111827' : '#FFFFFF' }]}>
                 <Image source={{ uri: 'https://i.pravatar.cc/240?img=12' }} style={styles.profileAvatar} resizeMode="cover" />
                 {token && user ? (
@@ -4607,7 +4739,11 @@ function MainApp() {
               <Text style={[styles.profilePanelTitle, { color: orderDetailPalette.title }]}>{activeProfilePanelTitle}</Text>
               <View style={styles.checkoutHeaderSpacer} />
             </View>
-            <ScrollView removeClippedSubviews contentContainerStyle={styles.profilePanelContent}>
+            <ScrollView
+              removeClippedSubviews
+              refreshControl={renderPageRefreshControl(orderDetailPalette.surface)}
+              contentContainerStyle={styles.profilePanelContent}
+            >
               {activeProfilePanel === 'orders' ? (
                 <View
                   style={[
@@ -4625,6 +4761,7 @@ function MainApp() {
                       const orderItems = Array.isArray(order.items) ? order.items : [];
                       const primaryItem = orderItems[0] || null;
                       const extraOrderItems = orderItems.slice(1);
+                      const isExtraItemsExpanded = expandedProfileOrderIds.includes(order.id);
                       const primaryItemTitle = String(primaryItem?.name || order.model || 'Order item').trim();
                       const primaryItemMetaText = buildOrderItemMetaText(
                         primaryItemTitle,
@@ -4636,7 +4773,9 @@ function MainApp() {
                         order.invoice && Number(order.invoice.gstTotal || 0) > 0
                           ? `Incl. GST ${formatCurrency(order.invoice.gstTotal)}`
                           : order.invoiceApprovalStatus === 'Approved'
-                            ? 'Invoice not available'
+                            ? order.invoice
+                              ? 'Invoice available'
+                              : 'Invoice approved'
                             : order.invoiceApprovalStatus === 'Rejected'
                               ? 'Invoice request disapproved'
                               : 'Awaiting admin approval';
@@ -4651,7 +4790,7 @@ function MainApp() {
                       const invoiceStatusTextColor =
                         order.invoiceApprovalStatus === 'Rejected'
                           ? orderDetailPalette.dangerText
-                          : order.invoice
+                          : order.invoiceApprovalStatus === 'Approved' || order.invoice
                             ? orderDetailPalette.successText
                             : orderDetailPalette.accentText;
                       const orderSummaryLine = [
@@ -4707,47 +4846,119 @@ function MainApp() {
                             <Text style={[styles.profileOrderTaxHint, { color: invoiceStatusTextColor }]}>{gstIncludedLabel}</Text>
 
                             {extraOrderItems.length > 0 ? (
-                              <View
-                                style={[
-                                  styles.profileOrderExtraItems,
-                                  {
-                                    backgroundColor: orderDetailPalette.surface,
-                                    borderColor: orderDetailPalette.border,
-                                  },
-                                ]}
-                              >
-                                <Text style={[styles.profileOrderSectionLabel, { color: orderDetailPalette.subtext }]}>
-                                  More items
-                                </Text>
-                                {extraOrderItems.map((item, itemIndex) => {
-                                  const itemLineTotal = Number(item.lineTotal || (item.unitPrice || 0) * item.qty);
-                                  return (
-                                    <View
-                                      key={item.id}
+                              <View style={styles.profileOrderExpandableBlock}>
+                                <Pressable
+                                  style={[
+                                    styles.profileOrderExpandToggle,
+                                    {
+                                      backgroundColor: isExtraItemsExpanded
+                                        ? orderDetailPalette.surface
+                                        : orderDetailPalette.summaryBg,
+                                      borderColor: orderDetailPalette.border,
+                                    },
+                                  ]}
+                                  onPress={event => {
+                                    event.stopPropagation();
+                                    toggleProfileOrderItems(order.id);
+                                  }}
+                                >
+                                  <View style={styles.profileOrderExpandCopy}>
+                                    <Text style={[styles.profileOrderExpandTitle, { color: orderDetailPalette.title }]}>
+                                      {isExtraItemsExpanded
+                                        ? 'Hide extra items'
+                                        : `Show ${extraOrderItems.length} more item${extraOrderItems.length === 1 ? '' : 's'}`}
+                                    </Text>
+                                    <Text style={[styles.profileOrderExpandSubtext, { color: orderDetailPalette.subtext }]}>
+                                      {isExtraItemsExpanded
+                                        ? 'Collapse the remaining items in this order.'
+                                        : 'Tap to view the remaining products included in this order.'}
+                                    </Text>
+                                  </View>
+                                  <View
+                                    style={[
+                                      styles.profileOrderExpandCountBadge,
+                                      {
+                                        backgroundColor: isExtraItemsExpanded
+                                          ? orderDetailPalette.accentBg
+                                          : orderDetailPalette.surface,
+                                        borderColor: orderDetailPalette.border,
+                                      },
+                                    ]}
+                                  >
+                                    <Text
                                       style={[
-                                        styles.profileOrderExtraItemRow,
-                                        itemIndex > 0
-                                          ? {
-                                              borderTopWidth: 1,
-                                              borderTopColor: orderDetailPalette.border,
-                                            }
-                                          : null,
+                                        styles.profileOrderExpandCountText,
+                                        { color: isExtraItemsExpanded ? orderDetailPalette.accentText : orderDetailPalette.buttonBg },
                                       ]}
                                     >
-                                      <Text
-                                        style={[styles.profileOrderExtraItemName, { color: orderDetailPalette.title }]}
-                                        numberOfLines={1}
-                                      >
-                                        {item.name}
+                                      +{extraOrderItems.length}
+                                    </Text>
+                                  </View>
+                                  <Text style={[styles.profileOrderExpandChevron, { color: orderDetailPalette.accentText }]}>
+                                    {isExtraItemsExpanded ? '▴' : '▾'}
+                                  </Text>
+                                </Pressable>
+
+                                {isExtraItemsExpanded ? (
+                                  <View
+                                    style={[
+                                      styles.profileOrderExtraItems,
+                                      {
+                                        backgroundColor: orderDetailPalette.surface,
+                                        borderColor: orderDetailPalette.border,
+                                      },
+                                    ]}
+                                  >
+                                    <View style={styles.profileOrderExtraItemsHeader}>
+                                      <Text style={[styles.profileOrderSectionLabel, { color: orderDetailPalette.subtext }]}>
+                                        More items
                                       </Text>
-                                      <Text
-                                        style={[styles.profileOrderExtraItemAmount, { color: orderDetailPalette.title }]}
-                                      >
-                                        {formatCurrency(itemLineTotal)}
+                                      <Text style={[styles.profileOrderExtraItemsCount, { color: orderDetailPalette.accentText }]}>
+                                        {extraOrderItems.length} item{extraOrderItems.length === 1 ? '' : 's'}
                                       </Text>
                                     </View>
-                                  );
-                                })}
+                                    {extraOrderItems.map((item, itemIndex) => {
+                                      const itemLineTotal = Number(item.lineTotal || (item.unitPrice || 0) * item.qty);
+                                      const itemMeta = buildOrderItemMetaText(item.name, item.model, item.capacity);
+                                      return (
+                                        <View
+                                          key={item.id}
+                                          style={[
+                                            styles.profileOrderExtraItemRow,
+                                            itemIndex > 0
+                                              ? {
+                                                  borderTopWidth: 1,
+                                                  borderTopColor: orderDetailPalette.border,
+                                                }
+                                              : null,
+                                          ]}
+                                        >
+                                          <View style={styles.profileOrderExtraItemCopy}>
+                                            <Text
+                                              style={[styles.profileOrderExtraItemName, { color: orderDetailPalette.title }]}
+                                              numberOfLines={1}
+                                            >
+                                              {item.name}
+                                            </Text>
+                                            {itemMeta ? (
+                                              <Text
+                                                style={[styles.profileOrderExtraItemMeta, { color: orderDetailPalette.subtext }]}
+                                                numberOfLines={1}
+                                              >
+                                                {itemMeta}
+                                              </Text>
+                                            ) : null}
+                                          </View>
+                                          <Text
+                                            style={[styles.profileOrderExtraItemAmount, { color: orderDetailPalette.title }]}
+                                          >
+                                            {formatCurrency(itemLineTotal)}
+                                          </Text>
+                                        </View>
+                                      );
+                                    })}
+                                  </View>
+                                ) : null}
                               </View>
                             ) : null}
                           </View>
@@ -5739,7 +5950,11 @@ function MainApp() {
               </Pressable>
             </View>
             {selectedInvoiceOrder ? (
-              <ScrollView removeClippedSubviews contentContainerStyle={styles.orderDetailContent}>
+              <ScrollView
+                removeClippedSubviews
+                refreshControl={renderPageRefreshControl(orderDetailPalette.surface)}
+                contentContainerStyle={styles.orderDetailContent}
+              >
                 <View
                   style={[
                     styles.orderDetailCard,
@@ -6237,6 +6452,19 @@ function MainApp() {
                       ? 'Enter your email and we will send you a reset link'
                       : 'Login to your account'}
                 </Text>
+                {authMode === 'login' && authEntryMessage ? (
+                  <View
+                    style={[
+                      styles.authEntryNotice,
+                      {
+                        backgroundColor: isDarkMode ? 'rgba(127, 29, 29, 0.18)' : '#FEF2F2',
+                        borderColor: isDarkMode ? '#7F1D1D' : '#FECACA',
+                      },
+                    ]}
+                  >
+                    <Text style={[styles.authEntryNoticeText, { color: isDarkMode ? '#FECACA' : '#991B1B' }]}>{authEntryMessage}</Text>
+                  </View>
+                ) : null}
 
                 {authMode === 'register' ? (
                   <>
@@ -6471,7 +6699,11 @@ function MainApp() {
               </Pressable>
             </View>
 
-            <ScrollView removeClippedSubviews contentContainerStyle={styles.locationModalContent}>
+            <ScrollView
+              removeClippedSubviews
+              refreshControl={renderPageRefreshControl(theme.panel)}
+              contentContainerStyle={styles.locationModalContent}
+            >
               <Text style={styles.locationSectionTitle}>Saved Addresses</Text>
               {filteredSavedLocations.length === 0 ? (
                 <Text style={[styles.small, { color: theme.subtext }]}>
@@ -6566,28 +6798,51 @@ function MainApp() {
           onRequestClose={() => setIsDetailModalVisible(false)}
         >
           <SafeAreaView style={[styles.detailModalSafe, { backgroundColor: theme.bg }]}>
-            <ScrollView removeClippedSubviews contentContainerStyle={styles.detailModalContent}>
+            <ScrollView
+              removeClippedSubviews
+              refreshControl={renderPageRefreshControl(theme.panel)}
+              contentContainerStyle={styles.detailModalContent}
+            >
               <View style={[styles.detailScreenWrap, { backgroundColor: theme.panelSoft }]}>
                 {isPublicDetailLoading ? <ActivityIndicator color={theme.primary} /> : null}
                 {selectedProduct ? (
                   <>
                     <View style={styles.detailHero}>
-                      <Image
-                        source={
-                          selectedProduct.images[0] || selectedProduct.images[1]
-                            ? { uri: selectedProduct.images[0] || selectedProduct.images[1] }
-                            : LANDING_HERO_IMAGE
-                        }
-                        style={styles.detailHeroImage}
-                        resizeMode="cover"
-                      />
-                      <View style={[styles.detailHeroOverlay, detailPageStyles.heroOverlay]} />
+                      <ScrollView
+                        key={`detail-gallery-${selectedProduct.id}`}
+                        horizontal
+                        pagingEnabled
+                        nestedScrollEnabled
+                        directionalLockEnabled
+                        showsHorizontalScrollIndicator={false}
+                        style={styles.detailHeroCarousel}
+                        onMomentumScrollEnd={event => {
+                          const pageWidth = event.nativeEvent.layoutMeasurement.width || viewportWidth;
+                          if (!pageWidth) {
+                            setSelectedProductImageIndex(0);
+                            return;
+                          }
+                          const nextIndex = Math.round(event.nativeEvent.contentOffset.x / pageWidth);
+                          setSelectedProductImageIndex(Math.max(0, Math.min(nextIndex, selectedProductGalleryImages.length - 1)));
+                        }}
+                      >
+                        {selectedProductGalleryImages.map((imageUri, index) => (
+                          <View key={`${selectedProduct.id}_image_${index}`} style={[styles.detailHeroSlide, { width: viewportWidth }]}>
+                            <Image
+                              source={imageUri ? { uri: imageUri } : LANDING_HERO_IMAGE}
+                              style={styles.detailHeroImage}
+                              resizeMode="cover"
+                            />
+                            <View style={[styles.detailHeroOverlay, detailPageStyles.heroOverlay]} />
+                          </View>
+                        ))}
+                      </ScrollView>
                       <View style={styles.detailTopActions}>
                         <Pressable style={[styles.detailCircleBtn, detailPageStyles.circleBtn]} onPress={() => setIsDetailModalVisible(false)}>
                           <Text style={[styles.detailCircleIcon, detailPageStyles.circleIcon]}>←</Text>
                         </Pressable>
                         <View style={{ flexDirection: 'row', gap: 8 }}>
-                          <Pressable style={[styles.detailCircleBtn, detailPageStyles.circleBtn]}>
+                          <Pressable style={[styles.detailCircleBtn, detailPageStyles.circleBtn]} onPress={openPublicSearchFromDetail}>
                             <Text style={[styles.detailCircleIcon, detailPageStyles.circleIcon]}>⌕</Text>
                           </Pressable>
                           <Pressable
@@ -6603,6 +6858,28 @@ function MainApp() {
                           </Pressable>
                         </View>
                       </View>
+                      {selectedProductImageUrls.length > 0 ? (
+                        <View style={[styles.detailImageCountPill, detailPageStyles.imageCountPill]}>
+                          <Text style={[styles.detailImageCountText, detailPageStyles.imageCountText]}>
+                            {Math.min(selectedProductImageIndex + 1, selectedProductImageUrls.length)} / {selectedProductImageUrls.length}
+                          </Text>
+                        </View>
+                      ) : null}
+                      {selectedProductImageUrls.length > 1 ? (
+                        <View style={styles.detailImageDotsRow}>
+                          {selectedProductImageUrls.map((_, index) => (
+                            <View
+                              key={`${selectedProduct.id}_dot_${index}`}
+                              style={[
+                                styles.detailImageDot,
+                                detailPageStyles.imageDot,
+                                index === selectedProductImageIndex && styles.detailImageDotActive,
+                                index === selectedProductImageIndex && detailPageStyles.imageDotActive,
+                              ]}
+                            />
+                          ))}
+                        </View>
+                      ) : null}
                       {isSelectedProductBestseller ? (
                         <View style={[styles.bestsellerTag, detailPageStyles.bestsellerTag]}>
                           <Text style={[styles.bestsellerTagText, detailPageStyles.bestsellerTagText]}>Bestseller</Text>
@@ -6686,22 +6963,29 @@ function MainApp() {
                           );
                         })}
                       </View>
-                      {selectedProductAvailableCapacities.length === 0 ? (
-                        <Text style={[styles.capacityUnavailableText, detailPageStyles.capacityHint]}>
-                          No Ah options available for this product right now.
-                        </Text>
+                      {isSelectedProductUnavailable ? (
+                        <View style={[styles.detailAvailabilityBanner, detailPageStyles.unavailableBanner]}>
+                          <Text style={[styles.detailAvailabilityTitle, detailPageStyles.unavailableTitle]}>Currently unavailable</Text>
+                          <Text style={[styles.detailAvailabilityText, detailPageStyles.unavailableText]}>
+                            This item is not available for order right now because no capacity option is available.
+                          </Text>
+                        </View>
                       ) : (
                         <Text style={[styles.capacityUnavailableText, detailPageStyles.capacityHint]}>
                           Unavailable Ah options are disabled.
                         </Text>
                       )}
                       <Text style={[styles.inCartIndicatorText, detailPageStyles.inCartText]}>
-                        {selectedVariantCartQty > 0
+                        {isSelectedProductUnavailable
+                          ? 'This item cannot be purchased right now.'
+                          : selectedVariantCartQty > 0
                           ? `In Cart: ${selectedVariantCartQty} (${selectedCapacity})`
                           : `Not in cart yet (${selectedCapacity})`}
                       </Text>
                       <Text style={[styles.productCartHint, detailPageStyles.cartHint]}>
-                        {selectedProductCartQty > 0
+                        {isSelectedProductUnavailable
+                          ? 'Please check again later when stock or capacity becomes available.'
+                          : selectedProductCartQty > 0
                           ? `Total added for this product: ${selectedProductCartQty}`
                           : 'This product is not in cart yet'}
                       </Text>
@@ -6719,7 +7003,11 @@ function MainApp() {
                           disabled={!isSelectedCapacityAvailable}
                         >
                           <Text style={[styles.addCartText, detailPageStyles.addCartText, !isSelectedCapacityAvailable && styles.ctaTextDisabled]}>
-                            {selectedVariantCartQty > 0 ? `Add More (${selectedVariantCartQty})` : 'Add to Cart'}
+                            {isSelectedProductUnavailable
+                              ? 'Currently Unavailable'
+                              : selectedVariantCartQty > 0
+                              ? `Add More (${selectedVariantCartQty})`
+                              : 'Add to Cart'}
                           </Text>
                         </Pressable>
                         <Pressable
@@ -6727,7 +7015,9 @@ function MainApp() {
                           onPress={handleBuyNowFromDetail}
                           disabled={!isSelectedCapacityAvailable}
                         >
-                          <Text style={[styles.buyNowText, !isSelectedCapacityAvailable && styles.ctaTextDisabled]}>Buy Now</Text>
+                          <Text style={[styles.buyNowText, !isSelectedCapacityAvailable && styles.ctaTextDisabled]}>
+                            {isSelectedProductUnavailable ? 'Unavailable' : 'Buy Now'}
+                          </Text>
                         </Pressable>
                       </View>
                     </View>
@@ -6755,7 +7045,11 @@ function MainApp() {
               <Text style={[styles.checkoutHeaderTitle, { color: theme.text }]}>Shopping Cart</Text>
               <View style={styles.checkoutHeaderSpacer} />
             </View>
-            <ScrollView removeClippedSubviews contentContainerStyle={styles.checkoutPageContent}>
+            <ScrollView
+              removeClippedSubviews
+              refreshControl={renderPageRefreshControl(theme.panel)}
+              contentContainerStyle={styles.checkoutPageContent}
+            >
               {isOrderPlaced ? (
                 <View style={styles.checkoutPlacedBanner}>
                   <Text style={styles.checkoutPlacedText}>Order placed successfully.</Text>
@@ -6915,6 +7209,7 @@ function MainApp() {
               </View>
               <ScrollView
                 removeClippedSubviews
+                refreshControl={renderPageRefreshControl(theme.panel)}
                 contentContainerStyle={{ paddingHorizontal: horizontalScreenPadding, paddingBottom: 30, gap: sectionGap }}
               >
                 <View style={styles.locationSearchInputWrap}>
@@ -7043,17 +7338,7 @@ function MainApp() {
       <ScrollView
         removeClippedSubviews
         keyboardShouldPersistTaps="always"
-        refreshControl={
-          <RefreshControl
-            refreshing={isPageRefreshing}
-            onRefresh={() => {
-              void refreshCurrentPage();
-            }}
-            tintColor={theme.primary}
-            colors={[theme.primary]}
-            progressBackgroundColor={theme.panel}
-          />
-        }
+        refreshControl={renderPageRefreshControl(theme.panel)}
         contentContainerStyle={{
           paddingTop: Math.max(10, insets.top),
           paddingHorizontal: horizontalScreenPadding,

@@ -21,7 +21,7 @@ export type ModuleId =
   | 'stock';
 
 export type AuthMode = 'none' | 'login' | 'register' | 'forgot';
-export type PublicView = 'landing' | 'categories' | 'categoryProducts' | 'list' | 'auth' | 'cart' | 'feedback';
+export type PublicView = 'landing' | 'categories' | 'categoryProducts' | 'list' | 'offers' | 'auth' | 'cart' | 'feedback';
 export type LandingCategory = 'inverters' | 'batteries' | 'accessories';
 export type ViewMoreContext = 'category' | 'featured' | 'all';
 export type ProfilePanel =

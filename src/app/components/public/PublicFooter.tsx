@@ -27,9 +27,9 @@ function PublicFooter({ theme, publicView, setPublicView, continueCheckout, cart
       <Pressable style={[styles.footerCenter, { backgroundColor: theme.accent }]} onPress={() => setPublicView('list')}>
         <Text style={[styles.footerCenterText, { color: '#052E16' }]}>+</Text>
       </Pressable>
-      <Pressable style={styles.footerItem} onPress={() => setPublicView('landing')}>
+      <Pressable style={styles.footerItem} onPress={() => setPublicView('offers')}>
         <Text style={[styles.footerIcon, { color: theme.text }]}>🏷</Text>
-        <Text style={[styles.small, { color: theme.subtext }]}>Offers</Text>
+        <Text style={[styles.small, { color: publicView === 'offers' ? theme.text : theme.subtext }]}>Offers</Text>
       </Pressable>
       <Pressable style={styles.footerItem} onPress={continueCheckout}>
         <View style={styles.footerCartWrap}>

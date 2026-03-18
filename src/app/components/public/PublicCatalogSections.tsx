@@ -1,5 +1,5 @@
 import React from 'react';
-import { ActivityIndicator, FlatList, Image, Pressable, ScrollView, Text, View } from 'react-native';
+import { ActivityIndicator, FlatList, Image, Pressable, ScrollView, Text, TextInput, View } from 'react-native';
 
 import { LANDING_HERO_IMAGE, darkTheme } from '../../constants';
 import styles from '../../styles';
@@ -19,6 +19,7 @@ type Props = {
   theme: Theme;
   publicView: PublicView;
   setPublicView: (view: PublicView) => void;
+  goBackPublicView: () => void;
   openViewMoreModal: (context: 'category' | 'featured' | 'all') => void;
   categoryCards: CategoryCard[];
   landingCategory: LandingCategory;
@@ -42,6 +43,7 @@ function PublicCatalogSections({
   theme,
   publicView,
   setPublicView,
+  goBackPublicView,
   openViewMoreModal,
   categoryCards,
   landingCategory,
@@ -61,6 +63,10 @@ function PublicCatalogSections({
   error,
 }: Props) {
   const isDarkMode = theme.bg === darkTheme.bg;
+  const [offersSearchQuery, setOffersSearchQuery] = React.useState('');
+  const [offersPage, setOffersPage] = React.useState(1);
+  const deferredOffersSearchQuery = React.useDeferredValue(offersSearchQuery);
+  const OFFERS_PAGE_SIZE = 10;
   const browseCategoryBlueprints = React.useMemo(
     () => [
       { id: 'exide_products', brandLabel: 'EXIDE', title: 'Exide Products', brandKeys: ['exide'], kindKeys: ['battery'], target: 'batteries' as LandingCategory },
@@ -129,6 +135,45 @@ function PublicCatalogSections({
   );
 
   const listItemSeparator = React.useCallback(() => <View style={styles.listItemSeparator} />, []);
+  const discountedProducts = React.useMemo(
+    () => publicProducts.filter(product => getDetailPrice(product).discountPct > 0),
+    [publicProducts],
+  );
+  const filteredDiscountedProducts = React.useMemo(() => {
+    const query = String(deferredOffersSearchQuery || '').trim().toLowerCase();
+    if (!query) {
+      return discountedProducts;
+    }
+
+    return discountedProducts.filter(product => {
+      const haystack = [
+        getLandingProductTitle(product),
+        getLandingProductModel(product),
+        product.brand,
+        product.category,
+        product.shortDescription,
+      ]
+        .map(value => String(value || '').toLowerCase().trim())
+        .filter(Boolean)
+        .join(' ');
+      return haystack.includes(query);
+    });
+  }, [deferredOffersSearchQuery, discountedProducts]);
+  const offersTotalPages = Math.max(1, Math.ceil(filteredDiscountedProducts.length / OFFERS_PAGE_SIZE));
+  const paginatedDiscountedProducts = React.useMemo(() => {
+    const pageStart = (offersPage - 1) * OFFERS_PAGE_SIZE;
+    return filteredDiscountedProducts.slice(pageStart, pageStart + OFFERS_PAGE_SIZE);
+  }, [filteredDiscountedProducts, offersPage]);
+
+  React.useEffect(() => {
+    setOffersPage(1);
+  }, [deferredOffersSearchQuery]);
+
+  React.useEffect(() => {
+    if (offersPage > offersTotalPages) {
+      setOffersPage(offersTotalPages);
+    }
+  }, [offersPage, offersTotalPages]);
 
   const renderAllProductRow = React.useCallback(
     ({ item }: { item: PublicProduct }) => {
@@ -245,7 +290,7 @@ function PublicCatalogSections({
         theme={theme}
         card={selectedCard}
         products={publicProducts}
-        onBack={goToLanding}
+        onBack={goBackPublicView}
         onOpenProduct={openProductDetail}
       />
     );
@@ -257,7 +302,7 @@ function PublicCatalogSections({
         <View style={[styles.card, { backgroundColor: theme.panel }]}>
           <View style={styles.rowBetween}>
             <Text style={[styles.title, { color: theme.text }]}>Categories</Text>
-            <Pressable onPress={goToLanding}>
+            <Pressable onPress={goBackPublicView}>
               <Text style={[styles.small, { color: theme.primary }]}>Back</Text>
             </Pressable>
           </View>
@@ -295,6 +340,121 @@ function PublicCatalogSections({
         </View>
         {error ? <Text style={[styles.small, { color: theme.danger }]}>{error}</Text> : null}
       </>
+    );
+  }
+
+  if (publicView === 'offers') {
+    const currentPageStart = filteredDiscountedProducts.length === 0 ? 0 : (offersPage - 1) * OFFERS_PAGE_SIZE + 1;
+    const currentPageEnd = Math.min(offersPage * OFFERS_PAGE_SIZE, filteredDiscountedProducts.length);
+
+    return (
+      <View style={[styles.card, { backgroundColor: theme.panel }]}>
+        <View style={styles.rowBetween}>
+          <Text style={[styles.title, { color: theme.text }]}>Discounted Offers</Text>
+          <Pressable onPress={goBackPublicView}>
+            <Text style={[styles.small, { color: theme.primary }]}>Back</Text>
+          </Pressable>
+        </View>
+
+        <View style={styles.locationSearchInputWrap}>
+          <TextInput
+            value={offersSearchQuery}
+            onChangeText={setOffersSearchQuery}
+            placeholder="Search discounted products"
+            placeholderTextColor={theme.subtext}
+            style={[
+              styles.searchInput,
+              offersSearchQuery.trim().length > 0 && styles.searchInputWithClear,
+              { color: theme.text, backgroundColor: theme.panelSoft },
+            ]}
+            autoCapitalize="none"
+            autoCorrect={false}
+            returnKeyType="search"
+          />
+          {offersSearchQuery.trim().length > 0 ? (
+            <Pressable style={styles.searchClearBtn} onPress={() => setOffersSearchQuery('')}>
+              <Text style={styles.searchClearBtnText}>✕</Text>
+            </Pressable>
+          ) : null}
+        </View>
+
+        <Text style={[styles.small, styles.offerSearchMeta, { color: theme.subtext }]}>
+          {filteredDiscountedProducts.length === 0
+            ? offersSearchQuery.trim().length > 0
+              ? 'No discounted products found for this search.'
+              : 'No discounted products available right now.'
+            : `Showing ${currentPageStart}-${currentPageEnd} of ${filteredDiscountedProducts.length} discounted product${
+                filteredDiscountedProducts.length === 1 ? '' : 's'
+              }`}
+        </Text>
+
+        <FlatList
+          data={paginatedDiscountedProducts}
+          keyExtractor={item => `offer_${item.id}`}
+          renderItem={renderAllProductRow}
+          scrollEnabled={false}
+          showsVerticalScrollIndicator={false}
+          removeClippedSubviews
+          initialNumToRender={10}
+          maxToRenderPerBatch={10}
+          updateCellsBatchingPeriod={50}
+          windowSize={5}
+          ItemSeparatorComponent={listItemSeparator}
+          ListEmptyComponent={null}
+        />
+
+        {filteredDiscountedProducts.length > 0 ? (
+          <View style={styles.offerPaginationRow}>
+            <Pressable
+              style={[
+                styles.offerPaginationBtn,
+                offersPage === 1 && styles.offerPaginationBtnDisabled,
+                {
+                  backgroundColor: theme.panelSoft,
+                  borderColor: theme.steel,
+                },
+              ]}
+              onPress={() => setOffersPage(prev => Math.max(1, prev - 1))}
+              disabled={offersPage === 1}
+            >
+              <Text
+                style={[
+                  styles.offerPaginationBtnText,
+                  { color: offersPage === 1 ? theme.subtext : theme.text },
+                ]}
+              >
+                Previous
+              </Text>
+            </Pressable>
+
+            <Text style={[styles.offerPaginationText, { color: theme.subtext }]}>
+              Page {offersPage} of {offersTotalPages}
+            </Text>
+
+            <Pressable
+              style={[
+                styles.offerPaginationBtn,
+                offersPage === offersTotalPages && styles.offerPaginationBtnDisabled,
+                {
+                  backgroundColor: theme.panelSoft,
+                  borderColor: theme.steel,
+                },
+              ]}
+              onPress={() => setOffersPage(prev => Math.min(offersTotalPages, prev + 1))}
+              disabled={offersPage === offersTotalPages}
+            >
+              <Text
+                style={[
+                  styles.offerPaginationBtnText,
+                  { color: offersPage === offersTotalPages ? theme.subtext : theme.text },
+                ]}
+              >
+                Next
+              </Text>
+            </Pressable>
+          </View>
+        ) : null}
+      </View>
     );
   }
 
@@ -439,7 +599,7 @@ function PublicCatalogSections({
       <View style={[styles.card, { backgroundColor: theme.panel }]}> 
         <View style={styles.rowBetween}>
           <Text style={[styles.title, { color: theme.text }]}>All Products</Text>
-          <Pressable onPress={goToLanding}>
+          <Pressable onPress={goBackPublicView}>
             <Text style={[styles.small, { color: theme.primary }]}>Back</Text>
           </Pressable>
         </View>
@@ -464,7 +624,7 @@ function PublicCatalogSections({
         <View style={[styles.card, { backgroundColor: theme.panel }]}> 
           <View style={styles.rowBetween}>
             <Text style={[styles.title, { color: theme.text }]}>My Cart</Text>
-            <Pressable onPress={goToLanding}>
+            <Pressable onPress={goBackPublicView}>
               <Text style={[styles.small, { color: theme.primary }]}>Continue Shopping</Text>
             </Pressable>
           </View>

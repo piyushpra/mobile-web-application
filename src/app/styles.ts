@@ -265,6 +265,19 @@ const styles = StyleSheet.create({
     marginTop: 4,
     marginBottom: 14,
   },
+  authEntryNotice: {
+    borderWidth: 1,
+    borderRadius: 14,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    marginBottom: 12,
+  },
+  authEntryNoticeText: {
+    fontSize: scaleFont(13),
+    lineHeight: scaleFont(18),
+    fontWeight: '700',
+    textAlign: 'center',
+  },
   authInputWrap: {
     borderRadius: 18,
     borderWidth: 1,
@@ -1765,6 +1778,39 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     marginTop: 2,
   },
+  offerSearchMeta: {
+    marginTop: 2,
+    marginBottom: 8,
+  },
+  offerPaginationRow: {
+    marginTop: 12,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 10,
+  },
+  offerPaginationBtn: {
+    minWidth: 96,
+    borderWidth: 1,
+    borderRadius: 999,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  offerPaginationBtnDisabled: {
+    opacity: 0.55,
+  },
+  offerPaginationBtnText: {
+    fontSize: scaleFont(12),
+    fontWeight: '800',
+  },
+  offerPaginationText: {
+    flex: 1,
+    textAlign: 'center',
+    fontSize: scaleFont(12),
+    fontWeight: '700',
+  },
   detailImage: {
     width: IS_COMPACT ? '100%' : scaleSize(240, 0.86, 1.05),
     height: scaleVertical(160, 0.86, 1.08),
@@ -1786,6 +1832,15 @@ const styles = StyleSheet.create({
   detailHero: {
     height: scaleVertical(250, 0.84, 1.1),
     position: 'relative',
+  },
+  detailHeroCarousel: {
+    width: '100%',
+    height: '100%',
+  },
+  detailHeroSlide: {
+    height: '100%',
+    position: 'relative',
+    overflow: 'hidden',
   },
   detailHeroImage: {
     width: '100%',
@@ -1824,6 +1879,40 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     textAlignVertical: 'center',
     includeFontPadding: false,
+  },
+  detailImageCountPill: {
+    position: 'absolute',
+    left: 14,
+    bottom: 14,
+    borderRadius: 999,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    minWidth: 52,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  detailImageCountText: {
+    fontSize: scaleFont(13),
+    fontWeight: '800',
+  },
+  detailImageDotsRow: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    bottom: 18,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+  },
+  detailImageDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 999,
+    borderWidth: 1,
+  },
+  detailImageDotActive: {
+    width: 18,
   },
   bestsellerTag: {
     position: 'absolute',
@@ -1979,6 +2068,22 @@ const styles = StyleSheet.create({
     color: '#6B7280',
     fontSize: 12,
     fontWeight: '600',
+  },
+  detailAvailabilityBanner: {
+    borderWidth: 1,
+    borderRadius: 14,
+    paddingHorizontal: 12,
+    paddingVertical: 11,
+    gap: 4,
+  },
+  detailAvailabilityTitle: {
+    fontSize: 14,
+    fontWeight: '800',
+  },
+  detailAvailabilityText: {
+    fontSize: 12,
+    fontWeight: '600',
+    lineHeight: 17,
   },
   inCartIndicatorText: {
     color: '#166534',
@@ -2844,6 +2949,52 @@ const styles = StyleSheet.create({
     fontWeight: '800',
     marginTop: 4,
   },
+  profileOrderExpandableBlock: {
+    marginTop: 10,
+    gap: 8,
+  },
+  profileOrderExpandToggle: {
+    borderWidth: 1,
+    borderRadius: 16,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  profileOrderExpandCopy: {
+    flex: 1,
+    gap: 3,
+  },
+  profileOrderExpandTitle: {
+    fontSize: 13,
+    lineHeight: 16,
+    fontWeight: '900',
+  },
+  profileOrderExpandSubtext: {
+    fontSize: 11,
+    lineHeight: 15,
+    fontWeight: '600',
+  },
+  profileOrderExpandCountBadge: {
+    minWidth: 38,
+    borderWidth: 1,
+    borderRadius: 999,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  profileOrderExpandCountText: {
+    fontSize: 11,
+    lineHeight: 13,
+    fontWeight: '900',
+  },
+  profileOrderExpandChevron: {
+    fontSize: 15,
+    lineHeight: 17,
+    fontWeight: '900',
+  },
   profileOrderItemsSection: {
     borderWidth: 1,
     borderRadius: 16,
@@ -2868,7 +3019,18 @@ const styles = StyleSheet.create({
     borderRadius: 16,
     paddingHorizontal: 10,
     paddingVertical: 10,
-    gap: 2,
+    gap: 4,
+  },
+  profileOrderExtraItemsHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 8,
+  },
+  profileOrderExtraItemsCount: {
+    fontSize: 11,
+    lineHeight: 13,
+    fontWeight: '800',
   },
   profileOrderSectionLabel: {
     fontSize: 11,
@@ -2879,16 +3041,24 @@ const styles = StyleSheet.create({
   },
   profileOrderExtraItemRow: {
     flexDirection: 'row',
-    alignItems: 'center',
+    alignItems: 'flex-start',
     justifyContent: 'space-between',
     gap: 12,
     paddingVertical: 9,
   },
-  profileOrderExtraItemName: {
+  profileOrderExtraItemCopy: {
     flex: 1,
+    gap: 3,
+  },
+  profileOrderExtraItemName: {
     fontSize: 13,
     lineHeight: 16,
     fontWeight: '700',
+  },
+  profileOrderExtraItemMeta: {
+    fontSize: 11,
+    lineHeight: 14,
+    fontWeight: '600',
   },
   profileOrderExtraItemAmount: {
     fontSize: 13,
