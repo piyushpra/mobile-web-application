@@ -367,6 +367,9 @@ export type ProfileServiceRequest = {
   createdAt: string;
   status: 'Pending' | 'Scheduled' | 'Resolved';
   note: string;
+  orderId?: string | null;
+  orderNumber?: string;
+  orderCreatedAt?: string;
 };
 
 export type ProfileWarrantyClaim = {
@@ -374,6 +377,9 @@ export type ProfileWarrantyClaim = {
   createdAt: string;
   status: 'Submitted' | 'Approved' | 'Rejected';
   note: string;
+  orderId?: string | null;
+  orderNumber?: string;
+  productId?: string | null;
 };
 
 export type SellerBillingSettings = {

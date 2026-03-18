@@ -2851,9 +2851,69 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: '900',
   },
+  profileServiceCard: {
+    borderWidth: 1,
+    borderRadius: 16,
+    paddingHorizontal: 12,
+    paddingVertical: 12,
+    gap: 10,
+  },
+  profileServiceCardHeader: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    justifyContent: 'space-between',
+    gap: 12,
+  },
+  profileServiceCardCopy: {
+    flex: 1,
+    minWidth: 0,
+    gap: 4,
+  },
+  profileServiceStatusBadge: {
+    borderRadius: 999,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    flexShrink: 0,
+  },
+  profileServiceStatusText: {
+    fontSize: 11,
+    lineHeight: 13,
+    fontWeight: '800',
+  },
+  profileServiceActionRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    flexWrap: 'wrap',
+  },
+  profileServiceSecondaryBtn: {
+    minWidth: 132,
+    borderWidth: 1,
+    borderRadius: 10,
+    paddingHorizontal: 14,
+    paddingVertical: 11,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  profileServiceSecondaryText: {
+    fontSize: 13,
+    lineHeight: 16,
+    fontWeight: '800',
+  },
   profileOrderRow: {
     alignItems: 'flex-start',
     paddingVertical: 8,
+  },
+  profileOrderCardLayout: {
+    width: '100%',
+    flexDirection: 'column',
+    alignItems: 'stretch',
+  },
+  profileOrderMainRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 10,
+    width: '100%',
   },
   profileOrderCard: {
     paddingHorizontal: 12,
@@ -2914,11 +2974,13 @@ const styles = StyleSheet.create({
   },
   profileOrderContent: {
     flex: 1,
+    minWidth: 0,
   },
   profileOrderAside: {
     alignItems: 'flex-end',
     gap: 3,
-    minWidth: 104,
+    minWidth: 96,
+    flexShrink: 0,
   },
   profileOrderTotalBlock: {
     minWidth: 84,
@@ -2965,6 +3027,7 @@ const styles = StyleSheet.create({
   profileOrderExpandCopy: {
     flex: 1,
     gap: 3,
+    minWidth: 0,
   },
   profileOrderExpandTitle: {
     fontSize: 13,
@@ -2984,6 +3047,7 @@ const styles = StyleSheet.create({
     paddingVertical: 5,
     alignItems: 'center',
     justifyContent: 'center',
+    flexShrink: 0,
   },
   profileOrderExpandCountText: {
     fontSize: 11,
@@ -2994,6 +3058,7 @@ const styles = StyleSheet.create({
     fontSize: 15,
     lineHeight: 17,
     fontWeight: '900',
+    flexShrink: 0,
   },
   profileOrderItemsSection: {
     borderWidth: 1,
@@ -3049,6 +3114,7 @@ const styles = StyleSheet.create({
   profileOrderExtraItemCopy: {
     flex: 1,
     gap: 3,
+    minWidth: 0,
   },
   profileOrderExtraItemName: {
     fontSize: 13,
@@ -3065,6 +3131,7 @@ const styles = StyleSheet.create({
     lineHeight: 16,
     fontWeight: '900',
     textAlign: 'right',
+    flexShrink: 0,
   },
   profileOrderItemsHeader: {
     flexDirection: 'row',

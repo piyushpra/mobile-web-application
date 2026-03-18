@@ -94,6 +94,11 @@ import {
   getOfferLabel,
   locationMatchesQuery,
 } from './utils/publicCatalog';
+import {
+  getActiveInstallationRequestByOrderId,
+  getEligibleInstallationOrders,
+  INSTALLATION_REQUEST_ELIGIBILITY_DAYS,
+} from './utils/serviceRequests';
 
 const DEFAULT_PAYMENT_METHODS: ProfilePaymentMethod[] = [
   { id: 'pm_cod', label: 'Cash on Delivery', detail: 'Pay when product is delivered', isDefault: true },
@@ -637,6 +642,76 @@ function normalizeProfileOrders(value: ProfileOrder[] | Partial<ProfileOrder>[] 
   return value.map((order, index) => normalizeProfileOrder(order, index));
 }
 
+function normalizeProfileServiceRequestStatus(value: unknown): ProfileServiceRequest['status'] {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (normalized === 'scheduled') {
+    return 'Scheduled';
+  }
+  if (normalized === 'resolved') {
+    return 'Resolved';
+  }
+  return 'Pending';
+}
+
+function normalizeProfileServiceRequest(
+  value: Partial<ProfileServiceRequest> | null | undefined,
+  index = 0,
+): ProfileServiceRequest {
+  return {
+    id: String(value?.id || `installation_${index + 1}`),
+    createdAt: String(value?.createdAt || ''),
+    status: normalizeProfileServiceRequestStatus(value?.status),
+    note: String(value?.note || ''),
+    orderId: toOptionalText(value?.orderId) || null,
+    orderNumber: String(value?.orderNumber || ''),
+    orderCreatedAt: toOptionalText(value?.orderCreatedAt),
+  };
+}
+
+function normalizeProfileServiceRequests(
+  value: ProfileServiceRequest[] | Partial<ProfileServiceRequest>[] | null | undefined,
+) {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.map((request, index) => normalizeProfileServiceRequest(request, index));
+}
+
+function normalizeProfileWarrantyClaimStatus(value: unknown): ProfileWarrantyClaim['status'] {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (normalized === 'approved') {
+    return 'Approved';
+  }
+  if (normalized === 'rejected') {
+    return 'Rejected';
+  }
+  return 'Submitted';
+}
+
+function normalizeProfileWarrantyClaim(
+  value: Partial<ProfileWarrantyClaim> | null | undefined,
+  index = 0,
+): ProfileWarrantyClaim {
+  return {
+    id: String(value?.id || `warranty_${index + 1}`),
+    createdAt: String(value?.createdAt || ''),
+    status: normalizeProfileWarrantyClaimStatus(value?.status),
+    note: String(value?.note || ''),
+    orderId: toOptionalText(value?.orderId) || null,
+    orderNumber: String(value?.orderNumber || ''),
+    productId: toOptionalText(value?.productId) || null,
+  };
+}
+
+function normalizeProfileWarrantyClaims(
+  value: ProfileWarrantyClaim[] | Partial<ProfileWarrantyClaim>[] | null | undefined,
+) {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.map((claim, index) => normalizeProfileWarrantyClaim(claim, index));
+}
+
 function normalizeAdminOrderRequest(
   value: Partial<AdminOrderRequest> | null | undefined,
   index = 0,
@@ -830,6 +905,8 @@ function MainApp() {
   const [paymentMethods, setPaymentMethods] = useState<ProfilePaymentMethod[]>(DEFAULT_PAYMENT_METHODS);
   const [installationRequests, setInstallationRequests] = useState<ProfileServiceRequest[]>([]);
   const [warrantyClaims, setWarrantyClaims] = useState<ProfileWarrantyClaim[]>([]);
+  const [installationRequestActionOrderId, setInstallationRequestActionOrderId] = useState<string | null>(null);
+  const [warrantyClaimActionId, setWarrantyClaimActionId] = useState<string | null>(null);
   const [notificationPrefs, setNotificationPrefs] = useState({
     orderUpdates: true,
     promotions: true,
@@ -1422,6 +1499,8 @@ function MainApp() {
     setActiveProfilePanel(null);
     setExpandedProfileOrderIds([]);
     setSelectedInvoiceOrder(null);
+    setInstallationRequestActionOrderId(null);
+    setWarrantyClaimActionId(null);
   };
 
   const openProfileEditModal = () => {
@@ -1923,18 +2002,36 @@ function MainApp() {
     }
   };
 
-  const addInstallationRequest = async () => {
+  const addInstallationRequest = async (order: ProfileOrder) => {
+    const orderId = String(order.id || '').trim();
+    const orderNumber = formatDisplayOrderCode(order.orderNumber);
+    if (!orderId) {
+      showToast('Order not found for installation request', 'error');
+      return;
+    }
+    if (installationRequestsByOrderId[orderId]) {
+      showToast('Installation request already exists for this order', 'error');
+      return;
+    }
+
+    setInstallationRequestActionOrderId(orderId);
     if (!token || !user) {
       const now = new Date();
-      setInstallationRequests(prev => [
-        {
-          id: `INS${now.getTime().toString().slice(-5)}`,
-          createdAt: now.toLocaleDateString('en-IN'),
-          status: 'Pending',
-          note: 'Installation requested for recent purchase',
-        },
-        ...prev,
-      ]);
+      setInstallationRequests(prev =>
+        normalizeProfileServiceRequests([
+          {
+            id: `INS${now.getTime().toString().slice(-5)}`,
+            createdAt: now.toISOString(),
+            status: 'Pending',
+            note: `Installation requested for ${orderNumber}`,
+            orderId,
+            orderNumber,
+            orderCreatedAt: order.createdAt,
+          },
+          ...prev,
+        ]),
+      );
+      setInstallationRequestActionOrderId(null);
       showToast('Installation request submitted');
       return;
     }
@@ -1944,28 +2041,75 @@ function MainApp() {
         '/api/public/storefront/installation-requests',
         {
           method: 'POST',
-          body: JSON.stringify({ note: 'Installation requested for recent purchase' }),
+          body: JSON.stringify({
+            orderId,
+            note: `Installation requested for ${orderNumber}`,
+          }),
         },
       );
-      setInstallationRequests(Array.isArray(json.installationRequests) ? json.installationRequests : []);
+      setInstallationRequests(normalizeProfileServiceRequests(json.installationRequests));
       showToast('Installation request submitted');
     } catch (err) {
-      showToast(err instanceof Error ? err.message : 'Installation request failed', 'error');
+      showActionError('Installation Request Failed', err, 'Installation request failed');
+    } finally {
+      setInstallationRequestActionOrderId(null);
     }
+  };
+
+  const removeInstallationRequest = (request: ProfileServiceRequest) => {
+    const requestId = String(request.id || '').trim();
+    const orderId = String(request.orderId || '').trim();
+    if (!requestId || !orderId) {
+      return;
+    }
+
+    Alert.alert('Remove Request', 'Do you want to remove this installation request?', [
+      { text: 'Cancel', style: 'cancel' },
+      {
+        text: 'Remove',
+        style: 'destructive',
+        onPress: async () => {
+          setInstallationRequestActionOrderId(orderId);
+          if (!token || !user) {
+            setInstallationRequests(prev => prev.filter(entry => entry.id !== requestId));
+            setInstallationRequestActionOrderId(null);
+            showToast('Installation request removed');
+            return;
+          }
+
+          try {
+            const json = await storefrontApiRequest<{ installationRequests: ProfileServiceRequest[] }>(
+              `/api/public/storefront/installation-requests/${encodeURIComponent(requestId)}`,
+              {
+                method: 'DELETE',
+              },
+            );
+            setInstallationRequests(normalizeProfileServiceRequests(json.installationRequests));
+            showToast('Installation request removed');
+          } catch (err) {
+            showActionError('Remove Request Failed', err, 'Unable to remove installation request');
+          } finally {
+            setInstallationRequestActionOrderId(null);
+          }
+        },
+      },
+    ]);
   };
 
   const addWarrantyClaim = async () => {
     if (!token || !user) {
       const now = new Date();
-      setWarrantyClaims(prev => [
-        {
-          id: `WAR${now.getTime().toString().slice(-5)}`,
-          createdAt: now.toLocaleDateString('en-IN'),
-          status: 'Submitted',
-          note: 'Warranty claim filed for product issue',
-        },
-        ...prev,
-      ]);
+      setWarrantyClaims(prev =>
+        normalizeProfileWarrantyClaims([
+          {
+            id: `WAR${now.getTime().toString().slice(-5)}`,
+            createdAt: now.toISOString(),
+            status: 'Submitted',
+            note: 'Warranty claim filed for product issue',
+          },
+          ...prev,
+        ]),
+      );
       showToast('Warranty claim submitted');
       return;
     }
@@ -1978,11 +2122,50 @@ function MainApp() {
           body: JSON.stringify({ note: 'Warranty claim filed for product issue' }),
         },
       );
-      setWarrantyClaims(Array.isArray(json.warrantyClaims) ? json.warrantyClaims : []);
+      setWarrantyClaims(normalizeProfileWarrantyClaims(json.warrantyClaims));
       showToast('Warranty claim submitted');
     } catch (err) {
       showToast(err instanceof Error ? err.message : 'Warranty claim failed', 'error');
     }
+  };
+
+  const removeWarrantyClaim = (claim: ProfileWarrantyClaim) => {
+    const claimId = String(claim.id || '').trim();
+    if (!claimId) {
+      return;
+    }
+
+    Alert.alert('Remove Claim', 'Do you want to remove this warranty claim?', [
+      { text: 'Cancel', style: 'cancel' },
+      {
+        text: 'Remove',
+        style: 'destructive',
+        onPress: async () => {
+          setWarrantyClaimActionId(claimId);
+          if (!token || !user) {
+            setWarrantyClaims(prev => prev.filter(entry => entry.id !== claimId));
+            setWarrantyClaimActionId(null);
+            showToast('Warranty claim removed');
+            return;
+          }
+
+          try {
+            const json = await storefrontApiRequest<{ warrantyClaims: ProfileWarrantyClaim[] }>(
+              `/api/public/storefront/warranty-claims/${encodeURIComponent(claimId)}`,
+              {
+                method: 'DELETE',
+              },
+            );
+            setWarrantyClaims(normalizeProfileWarrantyClaims(json.warrantyClaims));
+            showToast('Warranty claim removed');
+          } catch (err) {
+            showActionError('Remove Claim Failed', err, 'Unable to remove warranty claim');
+          } finally {
+            setWarrantyClaimActionId(null);
+          }
+        },
+      },
+    ]);
   };
 
   const closeCheckoutModal = () => {
@@ -2378,8 +2561,8 @@ function MainApp() {
             ? json.paymentMethods
             : DEFAULT_PAYMENT_METHODS,
         );
-        setInstallationRequests(Array.isArray(json.installationRequests) ? json.installationRequests : []);
-        setWarrantyClaims(Array.isArray(json.warrantyClaims) ? json.warrantyClaims : []);
+        setInstallationRequests(normalizeProfileServiceRequests(json.installationRequests));
+        setWarrantyClaims(normalizeProfileWarrantyClaims(json.warrantyClaims));
         if (json.notificationPrefs) {
           setNotificationPrefs({
             orderUpdates: Boolean(json.notificationPrefs.orderUpdates),
@@ -4046,6 +4229,14 @@ function MainApp() {
     () => publicProducts.filter(product => wishlistIds.includes(product.id)),
     [publicProducts, wishlistIds],
   );
+  const installationRequestsByOrderId = useMemo(
+    () => getActiveInstallationRequestByOrderId(installationRequests),
+    [installationRequests],
+  );
+  const eligibleInstallationOrders = useMemo(
+    () => getEligibleInstallationOrders(profileOrders, installationRequests),
+    [installationRequests, profileOrders],
+  );
   const isSelectedProductWishlisted = useMemo(
     () => Boolean(selectedProduct && wishlistIds.includes(selectedProduct.id)),
     [selectedProduct, wishlistIds],
@@ -4806,8 +4997,8 @@ function MainApp() {
                         <Pressable
                           key={order.id}
                           style={[
-                            styles.profilePanelRow,
                             styles.profileOrderRow,
+                            styles.profileOrderCardLayout,
                             {
                               backgroundColor: orderDetailPalette.surfaceSoft,
                               borderColor: orderDetailPalette.border,
@@ -4820,155 +5011,158 @@ function MainApp() {
                           ]}
                           onPress={() => openInvoiceForOrder(order)}
                         >
-                          <Image
-                            source={
-                              typeof (primaryItem?.thumbnail || order.thumbnail) === 'string' &&
-                              String(primaryItem?.thumbnail || order.thumbnail).trim().length > 0
-                                ? { uri: String(primaryItem?.thumbnail || order.thumbnail) }
-                                : appBrandLogo
-                            }
-                            style={styles.profileWishlistImage}
-                          />
-                          <View style={styles.profileOrderContent}>
-                            <Text style={[styles.profilePanelMain, { color: orderDetailPalette.title }]}>
-                              {formatDisplayOrderCode(order.orderNumber)}
-                            </Text>
-                            <Text style={[styles.profilePanelSub, { color: orderDetailPalette.text }]} numberOfLines={2}>
-                              {primaryItemTitle}
-                            </Text>
-                            <Text style={[styles.profilePanelSub, { color: orderDetailPalette.subtext }]} numberOfLines={1}>
-                              {orderSummaryLine}
-                            </Text>
-                            <Text style={[styles.profileOrderMetaText, { color: orderDetailPalette.accentText }]}>
-                              {invoiceNumber ? `${invoiceNumber} • ` : ''}
-                              {formatDisplayDate(order.createdAt)}
-                            </Text>
-                            <Text style={[styles.profileOrderTaxHint, { color: invoiceStatusTextColor }]}>{gstIncludedLabel}</Text>
+                          <View style={styles.profileOrderMainRow}>
+                            <Image
+                              source={
+                                typeof (primaryItem?.thumbnail || order.thumbnail) === 'string' &&
+                                String(primaryItem?.thumbnail || order.thumbnail).trim().length > 0
+                                  ? { uri: String(primaryItem?.thumbnail || order.thumbnail) }
+                                  : appBrandLogo
+                              }
+                              style={styles.profileWishlistImage}
+                            />
+                            <View style={styles.profileOrderContent}>
+                              <Text style={[styles.profilePanelMain, { color: orderDetailPalette.title }]}>
+                                {formatDisplayOrderCode(order.orderNumber)}
+                              </Text>
+                              <Text style={[styles.profilePanelSub, { color: orderDetailPalette.text }]} numberOfLines={2}>
+                                {primaryItemTitle}
+                              </Text>
+                              <Text style={[styles.profilePanelSub, { color: orderDetailPalette.subtext }]} numberOfLines={1}>
+                                {orderSummaryLine}
+                              </Text>
+                              <Text style={[styles.profileOrderMetaText, { color: orderDetailPalette.accentText }]}>
+                                {invoiceNumber ? `${invoiceNumber} • ` : ''}
+                                {formatDisplayDate(order.createdAt)}
+                              </Text>
+                              <Text style={[styles.profileOrderTaxHint, { color: invoiceStatusTextColor }]}>{gstIncludedLabel}</Text>
+                            </View>
+                            <View style={styles.profileOrderAside}>
+                              <Text style={[styles.profilePanelAmount, { color: orderDetailPalette.title }]}>
+                                {formatCurrency(order.total)}
+                              </Text>
+                              <Text style={[styles.profilePanelStatus, { color: orderStatusColor }]}>{displayOrderStatus}</Text>
+                              <Text style={[styles.profilePanelLink, { color: orderDetailPalette.buttonBg }]}>Open Details</Text>
+                            </View>
+                          </View>
 
-                            {extraOrderItems.length > 0 ? (
-                              <View style={styles.profileOrderExpandableBlock}>
-                                <Pressable
+                          {extraOrderItems.length > 0 ? (
+                            <View style={styles.profileOrderExpandableBlock}>
+                              <Pressable
+                                style={[
+                                  styles.profileOrderExpandToggle,
+                                  {
+                                    backgroundColor: isExtraItemsExpanded
+                                      ? orderDetailPalette.surface
+                                      : orderDetailPalette.summaryBg,
+                                    borderColor: orderDetailPalette.border,
+                                  },
+                                ]}
+                                onPress={event => {
+                                  event.stopPropagation();
+                                  toggleProfileOrderItems(order.id);
+                                }}
+                              >
+                                <View style={styles.profileOrderExpandCopy}>
+                                  <Text style={[styles.profileOrderExpandTitle, { color: orderDetailPalette.title }]} numberOfLines={1}>
+                                    {isExtraItemsExpanded
+                                      ? 'Hide extra items'
+                                      : `Show ${extraOrderItems.length} more item${extraOrderItems.length === 1 ? '' : 's'}`}
+                                  </Text>
+                                  <Text style={[styles.profileOrderExpandSubtext, { color: orderDetailPalette.subtext }]} numberOfLines={2}>
+                                    {isExtraItemsExpanded
+                                      ? 'All remaining items are shown below.'
+                                      : 'Tap to view the remaining items in this order.'}
+                                  </Text>
+                                </View>
+                                <View
                                   style={[
-                                    styles.profileOrderExpandToggle,
+                                    styles.profileOrderExpandCountBadge,
                                     {
                                       backgroundColor: isExtraItemsExpanded
-                                        ? orderDetailPalette.surface
-                                        : orderDetailPalette.summaryBg,
+                                        ? orderDetailPalette.accentBg
+                                        : orderDetailPalette.surface,
                                       borderColor: orderDetailPalette.border,
                                     },
                                   ]}
-                                  onPress={event => {
-                                    event.stopPropagation();
-                                    toggleProfileOrderItems(order.id);
-                                  }}
                                 >
-                                  <View style={styles.profileOrderExpandCopy}>
-                                    <Text style={[styles.profileOrderExpandTitle, { color: orderDetailPalette.title }]}>
-                                      {isExtraItemsExpanded
-                                        ? 'Hide extra items'
-                                        : `Show ${extraOrderItems.length} more item${extraOrderItems.length === 1 ? '' : 's'}`}
-                                    </Text>
-                                    <Text style={[styles.profileOrderExpandSubtext, { color: orderDetailPalette.subtext }]}>
-                                      {isExtraItemsExpanded
-                                        ? 'Collapse the remaining items in this order.'
-                                        : 'Tap to view the remaining products included in this order.'}
-                                    </Text>
-                                  </View>
-                                  <View
+                                  <Text
                                     style={[
-                                      styles.profileOrderExpandCountBadge,
-                                      {
-                                        backgroundColor: isExtraItemsExpanded
-                                          ? orderDetailPalette.accentBg
-                                          : orderDetailPalette.surface,
-                                        borderColor: orderDetailPalette.border,
-                                      },
+                                      styles.profileOrderExpandCountText,
+                                      { color: isExtraItemsExpanded ? orderDetailPalette.accentText : orderDetailPalette.buttonBg },
                                     ]}
                                   >
-                                    <Text
-                                      style={[
-                                        styles.profileOrderExpandCountText,
-                                        { color: isExtraItemsExpanded ? orderDetailPalette.accentText : orderDetailPalette.buttonBg },
-                                      ]}
-                                    >
-                                      +{extraOrderItems.length}
-                                    </Text>
-                                  </View>
-                                  <Text style={[styles.profileOrderExpandChevron, { color: orderDetailPalette.accentText }]}>
-                                    {isExtraItemsExpanded ? '▴' : '▾'}
+                                    +{extraOrderItems.length}
                                   </Text>
-                                </Pressable>
+                                </View>
+                                <Text style={[styles.profileOrderExpandChevron, { color: orderDetailPalette.accentText }]}>
+                                  {isExtraItemsExpanded ? '▴' : '▾'}
+                                </Text>
+                              </Pressable>
 
-                                {isExtraItemsExpanded ? (
-                                  <View
-                                    style={[
-                                      styles.profileOrderExtraItems,
-                                      {
-                                        backgroundColor: orderDetailPalette.surface,
-                                        borderColor: orderDetailPalette.border,
-                                      },
-                                    ]}
-                                  >
-                                    <View style={styles.profileOrderExtraItemsHeader}>
-                                      <Text style={[styles.profileOrderSectionLabel, { color: orderDetailPalette.subtext }]}>
-                                        More items
-                                      </Text>
-                                      <Text style={[styles.profileOrderExtraItemsCount, { color: orderDetailPalette.accentText }]}>
-                                        {extraOrderItems.length} item{extraOrderItems.length === 1 ? '' : 's'}
-                                      </Text>
-                                    </View>
-                                    {extraOrderItems.map((item, itemIndex) => {
-                                      const itemLineTotal = Number(item.lineTotal || (item.unitPrice || 0) * item.qty);
-                                      const itemMeta = buildOrderItemMetaText(item.name, item.model, item.capacity);
-                                      return (
-                                        <View
-                                          key={item.id}
-                                          style={[
-                                            styles.profileOrderExtraItemRow,
-                                            itemIndex > 0
-                                              ? {
-                                                  borderTopWidth: 1,
-                                                  borderTopColor: orderDetailPalette.border,
-                                                }
-                                              : null,
-                                          ]}
-                                        >
-                                          <View style={styles.profileOrderExtraItemCopy}>
+                              {isExtraItemsExpanded ? (
+                                <View
+                                  style={[
+                                    styles.profileOrderExtraItems,
+                                    {
+                                      backgroundColor: orderDetailPalette.surface,
+                                      borderColor: orderDetailPalette.border,
+                                    },
+                                  ]}
+                                >
+                                  <View style={styles.profileOrderExtraItemsHeader}>
+                                    <Text style={[styles.profileOrderSectionLabel, { color: orderDetailPalette.subtext }]}>
+                                      More items
+                                    </Text>
+                                    <Text style={[styles.profileOrderExtraItemsCount, { color: orderDetailPalette.accentText }]}>
+                                      {extraOrderItems.length} item{extraOrderItems.length === 1 ? '' : 's'}
+                                    </Text>
+                                  </View>
+                                  {extraOrderItems.map((item, itemIndex) => {
+                                    const itemLineTotal = Number(item.lineTotal || (item.unitPrice || 0) * item.qty);
+                                    const itemMeta = buildOrderItemMetaText(item.name, item.model, item.capacity);
+                                    return (
+                                      <View
+                                        key={item.id}
+                                        style={[
+                                          styles.profileOrderExtraItemRow,
+                                          itemIndex > 0
+                                            ? {
+                                                borderTopWidth: 1,
+                                                borderTopColor: orderDetailPalette.border,
+                                              }
+                                            : null,
+                                        ]}
+                                      >
+                                        <View style={styles.profileOrderExtraItemCopy}>
+                                          <Text
+                                            style={[styles.profileOrderExtraItemName, { color: orderDetailPalette.title }]}
+                                            numberOfLines={1}
+                                          >
+                                            {item.name}
+                                          </Text>
+                                          {itemMeta ? (
                                             <Text
-                                              style={[styles.profileOrderExtraItemName, { color: orderDetailPalette.title }]}
+                                              style={[styles.profileOrderExtraItemMeta, { color: orderDetailPalette.subtext }]}
                                               numberOfLines={1}
                                             >
-                                              {item.name}
+                                              {itemMeta}
                                             </Text>
-                                            {itemMeta ? (
-                                              <Text
-                                                style={[styles.profileOrderExtraItemMeta, { color: orderDetailPalette.subtext }]}
-                                                numberOfLines={1}
-                                              >
-                                                {itemMeta}
-                                              </Text>
-                                            ) : null}
-                                          </View>
-                                          <Text
-                                            style={[styles.profileOrderExtraItemAmount, { color: orderDetailPalette.title }]}
-                                          >
-                                            {formatCurrency(itemLineTotal)}
-                                          </Text>
+                                          ) : null}
                                         </View>
-                                      );
-                                    })}
-                                  </View>
-                                ) : null}
-                              </View>
-                            ) : null}
-                          </View>
-                          <View style={styles.profileOrderAside}>
-                            <Text style={[styles.profilePanelAmount, { color: orderDetailPalette.title }]}>
-                              {formatCurrency(order.total)}
-                            </Text>
-                            <Text style={[styles.profilePanelStatus, { color: orderStatusColor }]}>{displayOrderStatus}</Text>
-                            <Text style={[styles.profilePanelLink, { color: orderDetailPalette.buttonBg }]}>Open Details</Text>
-                          </View>
+                                        <Text
+                                          style={[styles.profileOrderExtraItemAmount, { color: orderDetailPalette.title }]}
+                                          numberOfLines={1}
+                                        >
+                                          {formatCurrency(itemLineTotal)}
+                                        </Text>
+                                      </View>
+                                    );
+                                  })}
+                                </View>
+                              ) : null}
+                            </View>
+                          ) : null}
                         </Pressable>
                       );
                     })
@@ -5788,32 +5982,131 @@ function MainApp() {
                     {
                       backgroundColor: orderDetailPalette.surface,
                       borderColor: orderDetailPalette.border,
+                      gap: 12,
                     },
                   ]}
                 >
-                  {installationRequests.length === 0 ? (
+                  <View
+                    style={[
+                      styles.profileServiceCard,
+                      {
+                        backgroundColor: orderDetailPalette.surfaceSoft,
+                        borderColor: orderDetailPalette.border,
+                      },
+                    ]}
+                  >
+                    <Text style={[styles.profilePanelMain, { color: orderDetailPalette.title }]}>Recent Orders Pending Installation</Text>
+                    <Text style={[styles.profilePanelSub, { color: orderDetailPalette.subtext }]}>
+                      Only orders from the last {INSTALLATION_REQUEST_ELIGIBILITY_DAYS} days that are still pending installation are shown here.
+                    </Text>
+                  </View>
+
+                  {eligibleInstallationOrders.length === 0 ? (
                     <Text style={[styles.profilePanelEmpty, { color: orderDetailPalette.subtext }]}>
-                      No installation requests yet.
+                      No pending installation orders are available in the last {INSTALLATION_REQUEST_ELIGIBILITY_DAYS} days.
                     </Text>
                   ) : (
-                    installationRequests.map(req => (
-                      <View key={req.id} style={styles.profilePanelRow}>
-                        <View style={{ flex: 1 }}>
-                          <Text style={[styles.profilePanelMain, { color: orderDetailPalette.title }]}>{req.id}</Text>
-                          <Text style={[styles.profilePanelSub, { color: orderDetailPalette.subtext }]}>
-                            {req.createdAt} • {req.note}
-                          </Text>
+                    eligibleInstallationOrders.map(order => {
+                      const primaryItem = order.items[0] || null;
+                      const linkedRequest = installationRequestsByOrderId[order.id];
+                      const isBusy = installationRequestActionOrderId === order.id;
+                      const installationStatusLabel = linkedRequest?.status || 'Not Requested';
+                      const installationStatusColors =
+                        linkedRequest?.status === 'Scheduled'
+                          ? {
+                              backgroundColor: orderDetailPalette.successBg,
+                              textColor: orderDetailPalette.successText,
+                            }
+                          : linkedRequest?.status === 'Pending'
+                            ? {
+                                backgroundColor: orderDetailPalette.accentBg,
+                                textColor: orderDetailPalette.accentText,
+                              }
+                            : {
+                                backgroundColor: orderDetailPalette.surface,
+                                textColor: orderDetailPalette.subtext,
+                              };
+
+                      return (
+                        <View
+                          key={order.id}
+                          style={[
+                            styles.profileServiceCard,
+                            {
+                              backgroundColor: orderDetailPalette.surfaceSoft,
+                              borderColor: orderDetailPalette.border,
+                            },
+                          ]}
+                        >
+                          <View style={styles.profileServiceCardHeader}>
+                            <View style={styles.profileServiceCardCopy}>
+                              <Text style={[styles.profilePanelMain, { color: orderDetailPalette.title }]}>
+                                {formatDisplayOrderCode(order.orderNumber)}
+                              </Text>
+                              <Text style={[styles.profilePanelSub, { color: orderDetailPalette.title }]} numberOfLines={2}>
+                                {primaryItem?.name || order.model || 'Order item'}
+                              </Text>
+                              <Text style={[styles.profilePanelSub, { color: orderDetailPalette.subtext }]}>
+                                {formatDisplayDate(order.createdAt)} • {order.itemCount} item{order.itemCount === 1 ? '' : 's'}
+                              </Text>
+                              <Text style={[styles.profilePanelSub, { color: orderDetailPalette.subtext }]}>
+                                {linkedRequest
+                                  ? `${formatDisplayDate(linkedRequest.createdAt)} • ${linkedRequest.note || 'Installation request created'}`
+                                  : 'Installation request has not been created yet.'}
+                              </Text>
+                            </View>
+                            <View
+                              style={[
+                                styles.profileServiceStatusBadge,
+                                {
+                                  backgroundColor: installationStatusColors.backgroundColor,
+                                },
+                              ]}
+                            >
+                              <Text style={[styles.profileServiceStatusText, { color: installationStatusColors.textColor }]}>
+                                {installationStatusLabel}
+                              </Text>
+                            </View>
+                          </View>
+
+                          <View style={styles.profileServiceActionRow}>
+                            {linkedRequest ? (
+                              <Pressable
+                                style={[
+                                  styles.profileServiceSecondaryBtn,
+                                  {
+                                    backgroundColor: orderDetailPalette.surface,
+                                    borderColor: orderDetailPalette.border,
+                                    opacity: isBusy ? 0.7 : 1,
+                                  },
+                                ]}
+                                onPress={() => removeInstallationRequest(linkedRequest)}
+                                disabled={isBusy}
+                              >
+                                <Text style={[styles.profileServiceSecondaryText, { color: orderDetailPalette.dangerText }]}>
+                                  {isBusy ? 'Removing...' : 'Remove Request'}
+                                </Text>
+                              </Pressable>
+                            ) : (
+                              <Pressable
+                                style={[
+                                  styles.profilePanelPrimaryBtn,
+                                  {
+                                    backgroundColor: orderDetailPalette.buttonBg,
+                                    opacity: isBusy ? 0.7 : 1,
+                                  },
+                                ]}
+                                onPress={() => addInstallationRequest(order)}
+                                disabled={isBusy}
+                              >
+                                <Text style={styles.profilePanelPrimaryText}>{isBusy ? 'Creating...' : 'Create Request'}</Text>
+                              </Pressable>
+                            )}
+                          </View>
                         </View>
-                        <Text style={[styles.profilePanelStatus, { color: orderDetailPalette.accentText }]}>{req.status}</Text>
-                      </View>
-                    ))
+                      );
+                    })
                   )}
-                  <Pressable
-                    style={[styles.profilePanelPrimaryBtn, { backgroundColor: orderDetailPalette.buttonBg }]}
-                    onPress={addInstallationRequest}
-                  >
-                    <Text style={styles.profilePanelPrimaryText}>Create Request</Text>
-                  </Pressable>
                 </View>
               ) : null}
 
@@ -5824,23 +6117,86 @@ function MainApp() {
                     {
                       backgroundColor: orderDetailPalette.surface,
                       borderColor: orderDetailPalette.border,
+                      gap: 12,
                     },
                   ]}
                 >
                   {warrantyClaims.length === 0 ? (
                     <Text style={[styles.profilePanelEmpty, { color: orderDetailPalette.subtext }]}>No warranty claims yet.</Text>
                   ) : (
-                    warrantyClaims.map(claim => (
-                      <View key={claim.id} style={styles.profilePanelRow}>
-                        <View style={{ flex: 1 }}>
-                          <Text style={[styles.profilePanelMain, { color: orderDetailPalette.title }]}>{claim.id}</Text>
-                          <Text style={[styles.profilePanelSub, { color: orderDetailPalette.subtext }]}>
-                            {claim.createdAt} • {claim.note}
-                          </Text>
+                    warrantyClaims.map(claim => {
+                      const claimStatusColors =
+                        claim.status === 'Approved'
+                          ? {
+                              backgroundColor: orderDetailPalette.successBg,
+                              textColor: orderDetailPalette.successText,
+                            }
+                          : claim.status === 'Rejected'
+                            ? {
+                                backgroundColor: '#FEE2E2',
+                                textColor: orderDetailPalette.dangerText,
+                              }
+                            : {
+                                backgroundColor: orderDetailPalette.accentBg,
+                                textColor: orderDetailPalette.accentText,
+                              };
+                      const isClaimBusy = warrantyClaimActionId === claim.id;
+
+                      return (
+                        <View
+                          key={claim.id}
+                          style={[
+                            styles.profileServiceCard,
+                            {
+                              backgroundColor: orderDetailPalette.surfaceSoft,
+                              borderColor: orderDetailPalette.border,
+                            },
+                          ]}
+                        >
+                          <View style={styles.profileServiceCardHeader}>
+                            <View style={styles.profileServiceCardCopy}>
+                              <Text style={[styles.profilePanelMain, { color: orderDetailPalette.title }]}>
+                                {claim.orderNumber ? formatDisplayOrderCode(claim.orderNumber) : claim.id}
+                              </Text>
+                              <Text style={[styles.profilePanelSub, { color: orderDetailPalette.subtext }]}>
+                                {formatDisplayDate(claim.createdAt)} • {claim.note}
+                              </Text>
+                            </View>
+                            <View
+                              style={[
+                                styles.profileServiceStatusBadge,
+                                {
+                                  backgroundColor: claimStatusColors.backgroundColor,
+                                },
+                              ]}
+                            >
+                              <Text style={[styles.profileServiceStatusText, { color: claimStatusColors.textColor }]}>
+                                {claim.status}
+                              </Text>
+                            </View>
+                          </View>
+
+                          <View style={styles.profileServiceActionRow}>
+                            <Pressable
+                              style={[
+                                styles.profileServiceSecondaryBtn,
+                                {
+                                  backgroundColor: orderDetailPalette.surface,
+                                  borderColor: orderDetailPalette.border,
+                                  opacity: isClaimBusy ? 0.7 : 1,
+                                },
+                              ]}
+                              onPress={() => removeWarrantyClaim(claim)}
+                              disabled={isClaimBusy}
+                            >
+                              <Text style={[styles.profileServiceSecondaryText, { color: orderDetailPalette.dangerText }]}>
+                                {isClaimBusy ? 'Removing...' : 'Remove Claim'}
+                              </Text>
+                            </Pressable>
+                          </View>
                         </View>
-                        <Text style={[styles.profilePanelStatus, { color: orderDetailPalette.accentText }]}>{claim.status}</Text>
-                      </View>
-                    ))
+                      );
+                    })
                   )}
                   <Pressable
                     style={[styles.profilePanelPrimaryBtn, { backgroundColor: orderDetailPalette.buttonBg }]}

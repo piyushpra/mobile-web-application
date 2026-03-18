@@ -5192,10 +5192,11 @@ async function fetchPaymentMethods(conn, userId) {
 async function fetchInstallationRequests(conn, userId) {
   if (!userId) return [];
   const [rows] = await conn.query(
-    `SELECT id, status, note, created_at
-     FROM installation_requests
-     WHERE user_id = ?
-     ORDER BY created_at DESC`,
+    `SELECT ir.id, ir.status, ir.note, ir.created_at, ir.order_id, co.order_number, co.placed_at AS order_created_at
+     FROM installation_requests ir
+     LEFT JOIN customer_orders co ON co.id = ir.order_id
+     WHERE ir.user_id = ?
+     ORDER BY ir.created_at DESC`,
     [userId],
   );
   return (Array.isArray(rows) ? rows : []).map(row => ({
@@ -5203,16 +5204,20 @@ async function fetchInstallationRequests(conn, userId) {
     createdAt: toYmd(row.created_at),
     status: row.status || 'Pending',
     note: row.note || '',
+    orderId: row.order_id || null,
+    orderNumber: row.order_number || '',
+    orderCreatedAt: row.order_created_at ? toIso(row.order_created_at) : null,
   }));
 }
 
 async function fetchWarrantyClaims(conn, userId) {
   if (!userId) return [];
   const [rows] = await conn.query(
-    `SELECT id, status, note, created_at
-     FROM warranty_claims
-     WHERE user_id = ?
-     ORDER BY created_at DESC`,
+    `SELECT wc.id, wc.status, wc.note, wc.created_at, wc.order_id, wc.product_id, co.order_number
+     FROM warranty_claims wc
+     LEFT JOIN customer_orders co ON co.id = wc.order_id
+     WHERE wc.user_id = ?
+     ORDER BY wc.created_at DESC`,
     [userId],
   );
   return (Array.isArray(rows) ? rows : []).map(row => ({
@@ -5220,6 +5225,9 @@ async function fetchWarrantyClaims(conn, userId) {
     createdAt: toYmd(row.created_at),
     status: row.status || 'Submitted',
     note: row.note || '',
+    orderId: row.order_id || null,
+    orderNumber: row.order_number || '',
+    productId: row.product_id || null,
   }));
 }
 
@@ -6646,6 +6654,30 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
+    const installationRequestId = getIdFromPath(pathname, '/api/public/storefront/installation-requests');
+    if (installationRequestId && req.method === 'DELETE') {
+      const authUser = await getAuth(req);
+      if (!authUser?.userId) {
+        sendError(res, 401, 'Login required for installation requests');
+        return;
+      }
+
+      const conn = await mysqlPool.getConnection();
+      try {
+        await conn.query(
+          `DELETE FROM installation_requests
+           WHERE id = ?
+             AND user_id = ?`,
+          [installationRequestId, authUser.userId],
+        );
+        const installationRequests = await fetchInstallationRequests(conn, authUser.userId);
+        sendJson(res, 200, { installationRequests });
+      } finally {
+        conn.release();
+      }
+      return;
+    }
+
     if (pathname === '/api/public/storefront/installation-requests' && req.method === 'POST') {
       const authUser = await getAuth(req);
       if (!authUser?.userId) {
@@ -6653,11 +6685,62 @@ const server = http.createServer(async (req, res) => {
         return;
       }
       const body = await parseJsonBody(req);
-      const note = String(body.note || 'Installation requested for recent purchase').trim();
-      const orderId = String(body.orderId || '').trim() || null;
+      const orderId = String(body.orderId || '').trim();
+      if (!orderId) {
+        sendError(res, 400, 'orderId is required');
+        return;
+      }
 
       const conn = await mysqlPool.getConnection();
       try {
+        const [orderRows] = await conn.query(
+          `SELECT id, order_number, placed_at, status
+           FROM customer_orders
+           WHERE id = ?
+             AND user_id = ?
+           LIMIT 1`,
+          [orderId, authUser.userId],
+        );
+        const orderRow = Array.isArray(orderRows) ? orderRows[0] : null;
+        if (!orderRow) {
+          sendError(res, 404, 'Order not found');
+          return;
+        }
+
+        if (String(orderRow.status || '').trim().toLowerCase() === 'cancelled') {
+          sendError(res, 400, 'Cancelled orders are not eligible for installation requests');
+          return;
+        }
+
+        const placedAtMs = new Date(orderRow.placed_at).getTime();
+        const eligibilityWindowMs = 7 * 24 * 60 * 60 * 1000;
+        if (!Number.isFinite(placedAtMs) || Date.now() - placedAtMs > eligibilityWindowMs || Date.now() < placedAtMs) {
+          sendError(res, 400, 'Installation requests are available only within 7 days of order placement');
+          return;
+        }
+
+        const [existingRequestRows] = await conn.query(
+          `SELECT status
+           FROM installation_requests
+           WHERE user_id = ?
+             AND order_id = ?
+           ORDER BY created_at DESC
+           LIMIT 1`,
+          [authUser.userId, orderId],
+        );
+        const latestRequest = Array.isArray(existingRequestRows) ? existingRequestRows[0] : null;
+        const latestStatus = String(latestRequest?.status || '').trim().toLowerCase();
+        if (latestStatus === 'resolved') {
+          sendError(res, 400, 'Installation is already completed for this order');
+          return;
+        }
+        if (latestStatus === 'pending' || latestStatus === 'scheduled') {
+          sendError(res, 409, 'Installation request already exists for this order');
+          return;
+        }
+
+        const defaultNote = `Installation requested for ${String(orderRow.order_number || orderId).trim()}`;
+        const note = String(body.note || defaultNote).trim();
         await conn.query(
           `INSERT INTO installation_requests
             (id, user_id, order_id, status, note)
@@ -6666,6 +6749,30 @@ const server = http.createServer(async (req, res) => {
         );
         const installationRequests = await fetchInstallationRequests(conn, authUser.userId);
         sendJson(res, 201, { installationRequests });
+      } finally {
+        conn.release();
+      }
+      return;
+    }
+
+    const warrantyClaimId = getIdFromPath(pathname, '/api/public/storefront/warranty-claims');
+    if (warrantyClaimId && req.method === 'DELETE') {
+      const authUser = await getAuth(req);
+      if (!authUser?.userId) {
+        sendError(res, 401, 'Login required for warranty claims');
+        return;
+      }
+
+      const conn = await mysqlPool.getConnection();
+      try {
+        await conn.query(
+          `DELETE FROM warranty_claims
+           WHERE id = ?
+             AND user_id = ?`,
+          [warrantyClaimId, authUser.userId],
+        );
+        const warrantyClaims = await fetchWarrantyClaims(conn, authUser.userId);
+        sendJson(res, 200, { warrantyClaims });
       } finally {
         conn.release();
       }
