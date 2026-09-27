@@ -30,14 +30,14 @@ export const darkTheme: Theme = {
   warning: '#FACC15',
 };
 
-const PUBLIC_API_ORIGIN = 'http://13.235.49.124';
+const PUBLIC_API_ORIGIN = 'http://13.206.110.29';
 
 export const API_BASE = Platform.select({
   android: PUBLIC_API_ORIGIN,
   ios: PUBLIC_API_ORIGIN,
   default: PUBLIC_API_ORIGIN,
 });
-export const APP_CURRENT_VERSION = '1.0.0';
+export const APP_CURRENT_VERSION = '1.0.2';
 export const APP_UPDATE_APP_ID = 'com.mobile';
 export const APP_UPDATE_CHANNEL = 'production';
 export const ITEM_CATEGORY_OPTIONS = ['Battery', 'Inverter', 'Miscellaneous'];

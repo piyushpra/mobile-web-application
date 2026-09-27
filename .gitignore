@@ -89,3 +89,8 @@ temp/
 # Local server runtime/generated data
 server/data/generated/
 server/data/inventory.json
+
+# Local deploy scripts (contain server host and SSH key path)
+scripts/release-to-lightsail.sh
+scripts/ec2-run.sh
+scripts/ec2-sync.sh

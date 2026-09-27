@@ -308,6 +308,14 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     paddingVertical: 12,
   },
+  authPasswordToggle: {
+    paddingHorizontal: 6,
+    paddingVertical: 8,
+    marginLeft: 4,
+  },
+  authPasswordToggleIcon: {
+    fontSize: scaleFont(18),
+  },
   authHint: {
     color: '#6B7280',
     fontSize: scaleFont(12),

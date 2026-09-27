@@ -7283,9 +7283,26 @@ const server = http.createServer(async (req, res) => {
         return;
       }
       const current = db.items[index];
+      const uploadedImageUrls = await saveUploadedItemImages(itemId, body.uploadedImages);
+      if (Array.isArray(body.uploadedImages) && body.uploadedImages.length > 0 && uploadedImageUrls.length === 0) {
+        sendError(res, 400, 'Uploaded images are invalid or exceed size limit');
+        return;
+      }
+      const patch = { ...body };
+      delete patch.uploadedImages;
+      if (Array.isArray(body.images) || uploadedImageUrls.length > 0) {
+        const ownStaticPrefix = `${getRequestBaseUrl(req)}/static/`;
+        const keptImages = (Array.isArray(body.images) ? body.images : [])
+          .map(value => String(value || '').trim())
+          .map(value => (value.startsWith(ownStaticPrefix) ? value.slice(ownStaticPrefix.length - '/static/'.length) : value))
+          .filter(value => value && (/^https?:\/\//i.test(value) || value.startsWith('/static/')));
+        patch.images = [...keptImages, ...uploadedImageUrls]
+          .filter((value, idx, arr) => arr.indexOf(value) === idx)
+          .slice(0, MAX_ITEM_UPLOAD_COUNT);
+      }
       const next = normalizeItem({
         ...current,
-        ...body,
+        ...patch,
         updatedAt: new Date().toISOString(),
       });
 

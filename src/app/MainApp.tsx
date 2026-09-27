@@ -843,6 +843,8 @@ function MainApp() {
   const [registerUsername, setRegisterUsername] = useState('');
   const [registerPhone, setRegisterPhone] = useState('');
   const [registerPassword, setRegisterPassword] = useState('');
+  const [isLoginPasswordVisible, setIsLoginPasswordVisible] = useState(false);
+  const [isRegisterPasswordVisible, setIsRegisterPasswordVisible] = useState(false);
   const [forgotUsername, setForgotUsername] = useState('');
   const [authMode, setAuthMode] = useState<AuthMode>('none');
   const [isAuthModalVisible, setIsAuthModalVisible] = useState(false);
@@ -1452,6 +1454,8 @@ function MainApp() {
       Animated.timing(authFormSlide, { toValue: nextSlideOffset, duration: 120, easing: Easing.out(Easing.cubic), useNativeDriver: true }),
     ]).start(() => {
       setAuthMode(mode);
+      setIsLoginPasswordVisible(false);
+      setIsRegisterPasswordVisible(false);
       if (mode !== 'login') {
         setAuthEntryMessage('');
       }
@@ -6861,11 +6865,22 @@ function MainApp() {
                       <TextInput
                         value={registerPassword}
                         onChangeText={setRegisterPassword}
-                        secureTextEntry
+                        secureTextEntry={!isRegisterPasswordVisible}
+                        autoCapitalize="none"
+                        autoCorrect={false}
                         placeholder="Password"
                         placeholderTextColor="#6B7280"
                         style={styles.authInputField}
                       />
+                      <Pressable
+                        onPress={() => setIsRegisterPasswordVisible(prev => !prev)}
+                        style={styles.authPasswordToggle}
+                        hitSlop={8}
+                        accessibilityRole="button"
+                        accessibilityLabel={isRegisterPasswordVisible ? 'Hide password' : 'Show password'}
+                      >
+                        <Text style={styles.authPasswordToggleIcon}>{isRegisterPasswordVisible ? '🙈' : '👁️'}</Text>
+                      </Pressable>
                     </View>
                     <Text style={[styles.authHint, { color: theme.subtext }]}>* Minimum 6 characters</Text>
                     <Pressable style={styles.authPrimaryBtn} onPress={register} disabled={isLoading}>
@@ -6948,11 +6963,22 @@ function MainApp() {
                       <TextInput
                         value={password}
                         onChangeText={setPassword}
-                        secureTextEntry
+                        secureTextEntry={!isLoginPasswordVisible}
+                        autoCapitalize="none"
+                        autoCorrect={false}
                         placeholder="Password"
                         placeholderTextColor="#6B7280"
                         style={styles.authInputField}
                       />
+                      <Pressable
+                        onPress={() => setIsLoginPasswordVisible(prev => !prev)}
+                        style={styles.authPasswordToggle}
+                        hitSlop={8}
+                        accessibilityRole="button"
+                        accessibilityLabel={isLoginPasswordVisible ? 'Hide password' : 'Show password'}
+                      >
+                        <Text style={styles.authPasswordToggleIcon}>{isLoginPasswordVisible ? '🙈' : '👁️'}</Text>
+                      </Pressable>
                     </View>
                     <Text
                       style={[styles.authForgot, { color: theme.accent, alignSelf: 'flex-end' }]}

@@ -11,6 +11,7 @@
     "prepare:android-release": "node scripts/prepare-android-release.js",
     "publish:android-update": "node scripts/publish-android-update.js",
     "release:android:auto": "node scripts/ec2-auto-release.js",
+    "release:lightsail": "bash scripts/release-to-lightsail.sh",
     "server": "node server/index.js",
     "dev:server": "node --watch server/index.js",
     "start": "react-native start",
