@@ -16,3 +16,23 @@ export async function getInstalledAppVersion(fallbackVersion: string): Promise<s
 
   return String(fallbackVersion || '').trim() || '0.0.0';
 }
+
+export type AppDistributionInfo = {
+  storeDistribution: boolean;
+  packageName: string;
+};
+
+export async function getAppDistributionInfo(): Promise<AppDistributionInfo> {
+  try {
+    if (typeof nativeAppInfo?.getDistributionInfo === 'function') {
+      const info = await nativeAppInfo.getDistributionInfo();
+      return {
+        storeDistribution: Boolean(info?.storeDistribution),
+        packageName: String(info?.packageName || '').trim(),
+      };
+    }
+  } catch {
+    // Older native builds without this method are sideloaded builds.
+  }
+  return { storeDistribution: false, packageName: '' };
+}

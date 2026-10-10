@@ -24,6 +24,7 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import AdminModuleContent from './components/admin/AdminModuleContent';
 import ListRow from './components/ListRow';
+import StartupProgressOverlay from './components/StartupProgressOverlay';
 import PublicCatalogSections from './components/public/PublicCatalogSections';
 import ProductDiscountStrip from './components/public/ProductDiscountStrip';
 import PublicFeedbackPage from './components/public/PublicFeedbackPage';
@@ -38,11 +39,14 @@ import {
   FOOTER_LOGO_IMAGE,
   FUELECTRIC_LOGO_IMAGE,
   LANDING_HERO_IMAGE,
+  PRIVACY_POLICY_URL,
+  SUPPORT_EMAIL,
+  SUPPORT_PHONE,
   darkTheme,
   modules,
   theme as lightTheme,
 } from './constants';
-import { getInstalledAppVersion } from './appInfo';
+import { getAppDistributionInfo, getInstalledAppVersion } from './appInfo';
 import {
   addAppUpdateDownloadListener,
   cancelAppUpdateDownload,
@@ -102,7 +106,7 @@ import {
 
 const DEFAULT_PAYMENT_METHODS: ProfilePaymentMethod[] = [
   { id: 'pm_cod', label: 'Cash on Delivery', detail: 'Pay when product is delivered', isDefault: true },
-  { id: 'pm_upi', label: 'UPI', detail: 'piyush@upi', isDefault: false },
+  { id: 'pm_upi', label: 'UPI', detail: 'Pay using any UPI app', isDefault: false },
 ];
 
 const DEFAULT_SELLER_BILLING_SETTINGS: SellerBillingSettings = {
@@ -160,6 +164,22 @@ const MAX_ITEM_IMAGES = 5;
 const AUTH_TOKEN_STORAGE_KEY = '@mobile/auth_token';
 const AUTH_USER_STORAGE_KEY = '@mobile/auth_user';
 const GUEST_DARK_MODE_STORAGE_KEY = '@mobile/guest_dark_mode';
+const GUEST_ID_STORAGE_KEY = '@mobile/guest_id';
+const GUEST_ID_PATTERN = /^[A-Za-z0-9_-]{6,60}$/;
+const REQUEST_TIMEOUT_MS = 20000;
+const UPLOAD_REQUEST_TIMEOUT_MS = 60000;
+const EXTERNAL_LOOKUP_TIMEOUT_MS = 8000;
+const CART_SYNC_DEBOUNCE_MS = 400;
+const STARTUP_MAX_WAIT_MS = 12000;
+
+type StartupStep = 'session' | 'catalog' | 'location' | 'storefront';
+
+const STARTUP_STEPS: { key: StartupStep; label: string }[] = [
+  { key: 'session', label: 'Restoring your session...' },
+  { key: 'catalog', label: 'Loading products...' },
+  { key: 'location', label: 'Checking delivery location...' },
+  { key: 'storefront', label: 'Preparing your store...' },
+];
 const APP_UPDATE_SKIP_VERSION_STORAGE_KEY = '@mobile/app_update_skipped_version';
 
 function getFilledItemImageUrls(urls: string[]) {
@@ -337,8 +357,46 @@ function formatByteSize(value: number) {
 }
 
 function toFetchError(url: string, err: unknown, fallback = 'Request failed') {
+  if ((err as { name?: string } | null)?.name === 'AbortError') {
+    return new Error('The server is taking too long to respond. Please check your connection and try again.');
+  }
   const message = err instanceof Error ? err.message : fallback;
   return new Error(sanitizeUserFacingErrorMessage(message, fallback));
+}
+
+async function fetchWithTimeout(input: string, init?: RequestInit, timeoutMs = REQUEST_TIMEOUT_MS) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(input, { ...init, signal: init?.signal ?? controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function createGuestId() {
+  const alphabet = 'abcdefghijklmnopqrstuvwxyz0123456789';
+  const bytes = new Uint8Array(24);
+  const cryptoApi = (globalThis as { crypto?: { getRandomValues?: (array: Uint8Array) => Uint8Array } }).crypto;
+  if (typeof cryptoApi?.getRandomValues === 'function') {
+    cryptoApi.getRandomValues(bytes);
+  } else {
+    for (let i = 0; i < bytes.length; i += 1) {
+      bytes[i] = Math.floor(Math.random() * 256);
+    }
+  }
+  const randomPart = Array.from(bytes, byte => alphabet[byte % alphabet.length]).join('');
+  return `gst_${Date.now().toString(36)}_${randomPart}`;
+}
+
+async function loadOrCreateGuestId() {
+  const saved = String((await AsyncStorage.getItem(GUEST_ID_STORAGE_KEY)) || '').trim();
+  if (GUEST_ID_PATTERN.test(saved)) {
+    return saved;
+  }
+  const next = createGuestId();
+  await AsyncStorage.setItem(GUEST_ID_STORAGE_KEY, next);
+  return next;
 }
 
 function toInvoicePdfFileName(invoiceNumber: string, fallbackOrderId: string) {
@@ -890,9 +948,9 @@ function MainApp() {
   const [isProfileModalVisible, setIsProfileModalVisible] = useState(false);
   const [activeProfilePanel, setActiveProfilePanel] = useState<ProfilePanel | null>(null);
   const [isProfileEditModalVisible, setIsProfileEditModalVisible] = useState(false);
-  const [profileName, setProfileName] = useState('Piyush Sharma');
-  const [profileEmail, setProfileEmail] = useState('piyush@email.com');
-  const [profilePhone, setProfilePhone] = useState('+91 98XXXXXXXX');
+  const [profileName, setProfileName] = useState('Guest');
+  const [profileEmail, setProfileEmail] = useState('');
+  const [profilePhone, setProfilePhone] = useState('');
   const [profileDraftName, setProfileDraftName] = useState('');
   const [profileDraftEmail, setProfileDraftEmail] = useState('');
   const [profileDraftPhone, setProfileDraftPhone] = useState('');
@@ -918,6 +976,11 @@ function MainApp() {
   const [sellerBillingDraft, setSellerBillingDraft] = useState<SellerBillingSettings>(DEFAULT_SELLER_BILLING_SETTINGS);
   const [isSellerBillingLoading, setIsSellerBillingLoading] = useState(false);
   const [isSellerBillingSaving, setIsSellerBillingSaving] = useState(false);
+  const [securityCurrentPassword, setSecurityCurrentPassword] = useState('');
+  const [securityNewPassword, setSecurityNewPassword] = useState('');
+  const [securityConfirmPassword, setSecurityConfirmPassword] = useState('');
+  const [deleteAccountPassword, setDeleteAccountPassword] = useState('');
+  const [isSecuritySubmitting, setIsSecuritySubmitting] = useState(false);
   const [adminOrderRequests, setAdminOrderRequests] = useState<AdminOrderRequest[]>([]);
   const [isAdminOrderRequestsLoading, setIsAdminOrderRequestsLoading] = useState(false);
   const [approvingAdminOrderId, setApprovingAdminOrderId] = useState<string | null>(null);
@@ -1002,10 +1065,18 @@ function MainApp() {
   const authFormOpacity = useRef(new Animated.Value(1)).current;
   const authFormSlide = useRef(new Animated.Value(0)).current;
   const publicScrollRef = useRef<ScrollView | null>(null);
+  const publicScrollY = useRef(new Animated.Value(0)).current;
+  const [stickySearchOffsetY, setStickySearchOffsetY] = useState(0);
   const publicSearchInputRef = useRef<TextInput | null>(null);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pendingProductDetailCapacityRef = useRef<string | null>(null);
-  const guestIdRef = useRef(`gst_${Math.random().toString(36).slice(2, 10)}`);
+  const [guestId, setGuestId] = useState(createGuestId);
+  const guestIdRef = useRef(guestId);
+  const cartSyncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [isSessionRestored, setIsSessionRestored] = useState(false);
+  const [completedStartupSteps, setCompletedStartupSteps] = useState<StartupStep[]>([]);
+  const [isStartupTimedOut, setIsStartupTimedOut] = useState(false);
+  const [isStartupOverlayVisible, setIsStartupOverlayVisible] = useState(true);
   const publicViewHistoryRef = useRef<PublicView[]>(['landing']);
   const lastAddActionRef = useRef<{ id: string; ts: number } | null>(null);
   const addActionLockRef = useRef(false);
@@ -1014,8 +1085,8 @@ function MainApp() {
   const guestDarkModeCacheRef = useRef<{ loaded: boolean; value: boolean }>({ loaded: false, value: false });
   const [isStorefrontHydrated, setIsStorefrontHydrated] = useState(false);
   const currentOwnerKey = useMemo(
-    () => (token && user?.id ? `user_${user.id}` : `guest_${guestIdRef.current}`),
-    [token, user?.id],
+    () => (token && user?.id ? `user_${user.id}` : `guest_${guestId}`),
+    [token, user?.id, guestId],
   );
 
   const canEdit = user?.role === 'admin';
@@ -1087,7 +1158,7 @@ function MainApp() {
       }
       let res: Response;
       try {
-        res = await fetch(url, { ...init, headers });
+        res = await fetchWithTimeout(url, { ...init, headers });
       } catch (err) {
         throw toFetchError(url, err, 'Location request failed');
       }
@@ -1123,11 +1194,16 @@ function MainApp() {
         headers.Authorization = `Bearer ${authToken}`;
       }
       let response: Response;
+      const isLargeBody = typeof init?.body === 'string' && init.body.length > 256 * 1024;
       try {
-        response = await fetch(url, {
-          ...init,
-          headers,
-        });
+        response = await fetchWithTimeout(
+          url,
+          {
+            ...init,
+            headers,
+          },
+          isLargeBody ? UPLOAD_REQUEST_TIMEOUT_MS : REQUEST_TIMEOUT_MS,
+        );
       } catch (err) {
         throw toFetchError(url, err);
       }
@@ -1140,6 +1216,7 @@ function MainApp() {
       setToken(null);
       setUser(null);
       void clearSavedAuthSession();
+      showToast('Your session has expired. Please log in again.', 'error');
       ({ response, json } = await runRequest(null));
     }
 
@@ -1164,7 +1241,7 @@ function MainApp() {
 
       let res: Response;
       try {
-        res = await fetch(url.toString(), {
+        res = await fetchWithTimeout(url.toString(), {
           ...init,
           headers,
         });
@@ -1301,7 +1378,7 @@ function MainApp() {
       url.searchParams.set('platform', platform);
       url.searchParams.set('currentVersion', installedVersion);
 
-      const res = await fetch(url.toString());
+      const res = await fetchWithTimeout(url.toString());
       const json = await parseResponseSafe(res);
       if (!res.ok) {
         return;
@@ -1322,7 +1399,17 @@ function MainApp() {
         Boolean((json as any)?.forceUpdate) ||
         Boolean((json as any)?.mandatory) ||
         (minimumSupportedVersion ? compareVersionStrings(minimumSupportedVersion, currentVersion) > 0 : false);
-      const downloadUrl = String((json as any)?.downloadUrl || '').trim();
+      // Store builds must update through the store, never by downloading an APK.
+      const distribution =
+        platform === 'android' ? await getAppDistributionInfo() : { storeDistribution: true, packageName: '' };
+      let downloadUrl = String((json as any)?.downloadUrl || '').trim();
+      if (distribution.storeDistribution && platform === 'android') {
+        downloadUrl = `https://play.google.com/store/apps/details?id=${encodeURIComponent(
+          distribution.packageName || APP_UPDATE_APP_ID,
+        )}`;
+      } else if (platform === 'ios' && !/^https:\/\/apps\.apple\.com\/.*id[1-9]\d{5,}/.test(downloadUrl)) {
+        return;
+      }
       if (!downloadUrl) {
         return;
       }
@@ -1350,7 +1437,7 @@ function MainApp() {
         fileSizeBytes: Math.max(0, Number((json as any)?.fileSizeBytes || 0)),
       };
 
-      if (platform === 'android' && isAppUpdateInstallerAvailable()) {
+      if (platform === 'android' && !distribution.storeDistribution && isAppUpdateInstallerAvailable()) {
         setAvailableAppUpdate(nextUpdateInfo);
         setAppUpdateDownloadStatus('idle');
         setAppUpdateDownloadProgress(0);
@@ -1626,6 +1713,94 @@ function MainApp() {
     setIsLocationModalVisible(true);
   };
 
+  const openPrivacyPolicy = () => {
+    Linking.openURL(PRIVACY_POLICY_URL).catch(() => showToast('Unable to open the privacy policy', 'error'));
+  };
+
+  const resetSecurityForm = () => {
+    setSecurityCurrentPassword('');
+    setSecurityNewPassword('');
+    setSecurityConfirmPassword('');
+    setDeleteAccountPassword('');
+  };
+
+  const submitChangePassword = async () => {
+    if (!token || isSecuritySubmitting) {
+      return;
+    }
+    const currentPassword = securityCurrentPassword.trim();
+    const newPassword = securityNewPassword.trim();
+    if (!currentPassword || !newPassword) {
+      Alert.alert('Validation', 'Enter your current and new password.');
+      return;
+    }
+    if (newPassword.length < 6) {
+      Alert.alert('Validation', 'New password must be at least 6 characters.');
+      return;
+    }
+    if (newPassword !== securityConfirmPassword.trim()) {
+      Alert.alert('Validation', 'New password and confirmation do not match.');
+      return;
+    }
+    try {
+      setIsSecuritySubmitting(true);
+      const json = await apiRequest<{ token?: string }>('/api/auth/change-password', {
+        method: 'POST',
+        body: JSON.stringify({ currentPassword, newPassword }),
+      });
+      if (json.token) {
+        await AsyncStorage.setItem(AUTH_TOKEN_STORAGE_KEY, json.token);
+        setToken(json.token);
+      }
+      resetSecurityForm();
+      showToast('Password updated. Other devices have been signed out.');
+    } catch (err) {
+      Alert.alert('Password Not Changed', err instanceof Error ? err.message : 'Unable to change password');
+    } finally {
+      setIsSecuritySubmitting(false);
+    }
+  };
+
+  const submitDeleteAccount = async () => {
+    try {
+      setIsSecuritySubmitting(true);
+      await apiRequest('/api/auth/delete-account', {
+        method: 'POST',
+        body: JSON.stringify({ password: deleteAccountPassword.trim() }),
+      });
+      resetSecurityForm();
+      setActiveProfilePanel(null);
+      closeProfileModal();
+      navigatePublicView('landing', { reset: true });
+      await clearSavedAuthSession();
+      setToken(null);
+      setUser(null);
+      showToast('Your account has been deleted');
+    } catch (err) {
+      Alert.alert('Account Not Deleted', err instanceof Error ? err.message : 'Unable to delete account');
+    } finally {
+      setIsSecuritySubmitting(false);
+    }
+  };
+
+  const confirmDeleteAccount = () => {
+    if (!token || isSecuritySubmitting) {
+      return;
+    }
+    if (!deleteAccountPassword.trim()) {
+      Alert.alert('Password Required', 'Enter your password to confirm account deletion.');
+      return;
+    }
+    Alert.alert(
+      'Delete Account?',
+      'This permanently removes your login, saved addresses, wishlist and payment methods. Orders and invoices are kept for tax records. This cannot be undone.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        { text: 'Delete', style: 'destructive', onPress: () => void submitDeleteAccount() },
+      ],
+    );
+  };
+
   const loadSellerBillingSettings = async () => {
     if (!token || user?.role !== 'admin') {
       return;
@@ -1884,8 +2059,8 @@ function MainApp() {
       'How would you like to contact support?',
       [
         { text: 'Cancel', style: 'cancel' },
-        { text: 'Email', onPress: () => Linking.openURL('mailto:support@fuelectric.com') },
-        { text: 'Call', onPress: () => Linking.openURL('tel:+919876543210') },
+        { text: 'Email', onPress: () => Linking.openURL(`mailto:${SUPPORT_EMAIL}`) },
+        { text: 'Call', onPress: () => Linking.openURL(`tel:${SUPPORT_PHONE}`) },
       ],
     );
   };
@@ -2180,10 +2355,6 @@ function MainApp() {
     setIsOrderPlaced(false);
   };
 
-  const handleSocialAuthPress = (provider: 'Google' | 'Facebook') => {
-    showToast(`${provider} authentication coming soon`, 'error');
-  };
-
   const addProductToCart = (product: PublicProductDetail, capacity: string, qtyToAdd = 1) => {
     const unitPrice = getDetailPrice(product).base;
     const itemId = `${product.id}_${capacity}`.toLowerCase();
@@ -2304,6 +2475,11 @@ function MainApp() {
   const submitCheckoutOrder = async () => {
     try {
       setIsCheckoutSubmitting(true);
+      if (cartSyncTimerRef.current) {
+        clearTimeout(cartSyncTimerRef.current);
+        cartSyncTimerRef.current = null;
+        await syncCartToStorefront(cartItems);
+      }
       const checkoutRes = await storefrontApiRequest<{
         order?: ProfileOrder;
         orders?: ProfileOrder[];
@@ -2454,6 +2630,19 @@ function MainApp() {
       Alert.alert('Cart Empty', 'Add items to cart before checkout.');
       return;
     }
+    if (!checkoutFirstName.trim()) {
+      Alert.alert('Contact Details', 'Please enter your name so we can deliver your order.');
+      return;
+    }
+    if (checkoutPhone.replace(/\D/g, '').length < 10) {
+      Alert.alert('Contact Details', 'Please enter a valid mobile number so we can confirm delivery.');
+      return;
+    }
+    const email = checkoutEmail.trim();
+    if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      Alert.alert('Contact Details', 'Please enter a valid email address or leave it empty.');
+      return;
+    }
     await submitCheckoutOrder();
   };
 
@@ -2495,7 +2684,7 @@ function MainApp() {
       const stockUrl = `${API_BASE}/api/public/stock`;
       let stockRes: Response;
       try {
-        stockRes = await fetch(stockUrl);
+        stockRes = await fetchWithTimeout(stockUrl);
       } catch (err) {
         throw toFetchError(stockUrl, err, 'Failed to load public stock');
       }
@@ -2508,7 +2697,7 @@ function MainApp() {
       // Try products endpoint first; fallback to stock-derived cards if unavailable.
       try {
         const productsUrl = `${API_BASE}/api/public/products`;
-        const productsRes = await fetch(productsUrl);
+        const productsRes = await fetchWithTimeout(productsUrl);
         const productsJson = await productsRes.json();
         if (productsRes.ok && Array.isArray(productsJson.products)) {
           setPublicProducts(productsJson.products);
@@ -2591,9 +2780,9 @@ function MainApp() {
         setWarrantyClaims([]);
         setSellerBillingSettings(DEFAULT_SELLER_BILLING_SETTINGS);
         setSellerBillingDraft(DEFAULT_SELLER_BILLING_SETTINGS);
-        setProfileName('Piyush Sharma');
-        setProfileEmail('piyush@email.com');
-        setProfilePhone('+91 98XXXXXXXX');
+        setProfileName('Guest');
+        setProfileEmail('');
+        setProfilePhone('');
         setProfileDarkMode(guestDarkMode);
         setNotificationPrefs({
           orderUpdates: true,
@@ -2627,7 +2816,7 @@ function MainApp() {
       const detailUrl = `${API_BASE}/api/public/products/${productId}`;
       let res: Response;
       try {
-        res = await fetch(detailUrl);
+        res = await fetchWithTimeout(detailUrl);
       } catch (err) {
         throw toFetchError(detailUrl, err, 'Failed to load product details');
       }
@@ -2808,7 +2997,7 @@ function MainApp() {
           return;
         }
         try {
-          const pinRes = await fetch(`https://api.postalpincode.in/pincode/${encodeURIComponent(q)}`);
+          const pinRes = await fetchWithTimeout(`https://api.postalpincode.in/pincode/${encodeURIComponent(q)}`, undefined, EXTERNAL_LOOKUP_TIMEOUT_MS);
           const pinJson = await parseResponseSafe(pinRes);
           const first = Array.isArray(pinJson) ? pinJson[0] : null;
           if (pinRes.ok && first?.Status === 'Success' && Array.isArray(first?.PostOffice)) {
@@ -2821,8 +3010,10 @@ function MainApp() {
         }
       } else {
         try {
-          const omRes = await fetch(
+          const omRes = await fetchWithTimeout(
             `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(q)}&count=5&language=en&format=json`,
+            undefined,
+            EXTERNAL_LOOKUP_TIMEOUT_MS,
           );
           const omJson = await parseResponseSafe(omRes);
           if (omRes.ok && Array.isArray((omJson as any)?.results)) {
@@ -2836,13 +3027,14 @@ function MainApp() {
 
         if (mapped.length === 0) {
           try {
-            const nomRes = await fetch(
+            const nomRes = await fetchWithTimeout(
               `https://nominatim.openstreetmap.org/search?format=jsonv2&addressdetails=1&limit=5&q=${encodeURIComponent(q)}`,
               {
                 headers: {
                   Accept: 'application/json',
                 },
               },
+              EXTERNAL_LOOKUP_TIMEOUT_MS,
             );
             const nomJson = await parseResponseSafe(nomRes);
             if (nomRes.ok && Array.isArray(nomJson)) {
@@ -2872,6 +3064,12 @@ function MainApp() {
   const detectCurrentLocation = async () => {
     try {
       setIsDetectingLocation(true);
+      // No geolocation module is bundled, so skip the OS permission prompt and use network lookup.
+      const nav = (globalThis as any).navigator;
+      if (!nav?.geolocation?.getCurrentPosition) {
+        await detectLocationByNetwork();
+        return;
+      }
       if (Platform.OS === 'android') {
         const finePermission = PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION;
         const coarsePermission = PermissionsAndroid.PERMISSIONS.ACCESS_COARSE_LOCATION;
@@ -2909,13 +3107,6 @@ function MainApp() {
         }
       }
 
-      const nav = (globalThis as any).navigator;
-      if (!nav?.geolocation?.getCurrentPosition) {
-        showToast('GPS not available in this build, using network location');
-        await detectLocationByNetwork();
-        return;
-      }
-
       const position = await new Promise<any>((resolve, reject) => {
         nav.geolocation.getCurrentPosition(resolve, reject, {
           enableHighAccuracy: true,
@@ -2933,8 +3124,10 @@ function MainApp() {
       let label = `Lat ${lat.toFixed(4)}, Lng ${lng.toFixed(4)}`;
 
       try {
-        const r = await fetch(
+        const r = await fetchWithTimeout(
           `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${encodeURIComponent(String(lat))}&lon=${encodeURIComponent(String(lng))}`,
+          undefined,
+          EXTERNAL_LOOKUP_TIMEOUT_MS,
         );
         const j = await r.json();
         const addr = j?.address || {};
@@ -3004,7 +3197,7 @@ function MainApp() {
       const providerErrors: string[] = [];
 
       try {
-        const ipRes = await fetch('https://ipapi.co/json/');
+        const ipRes = await fetchWithTimeout('https://ipapi.co/json/', undefined, EXTERNAL_LOOKUP_TIMEOUT_MS);
         const ipJson = await parseResponseSafe(ipRes);
         if (!ipRes.ok || typeof ipJson !== 'object' || !ipJson) {
           throw new Error(`ipapi unavailable (${ipRes.status})`);
@@ -3023,7 +3216,7 @@ function MainApp() {
 
       if (!resolved) {
         try {
-          const backupRes = await fetch('https://ipwho.is/');
+          const backupRes = await fetchWithTimeout('https://ipwho.is/', undefined, EXTERNAL_LOOKUP_TIMEOUT_MS);
           const backupJson = await parseResponseSafe(backupRes);
           if (!backupRes.ok || typeof backupJson !== 'object' || !(backupJson as any).success) {
             throw new Error(`ipwho.is unavailable (${backupRes.status})`);
@@ -3113,6 +3306,9 @@ function MainApp() {
         setSelectedCustomerId(cusRes.customers[0].id);
       }
     } catch (err) {
+      if ((err as { status?: number } | null)?.status === 401) {
+        return;
+      }
       setError(err instanceof Error ? err.message : 'Failed to load data');
     } finally {
       setIsLoading(false);
@@ -3156,6 +3352,25 @@ function MainApp() {
     }
   };
 
+  const markStartupStep = React.useCallback((step: StartupStep) => {
+    setCompletedStartupSteps(prev => (prev.includes(step) ? prev : [...prev, step]));
+  }, []);
+  const hideStartupOverlay = React.useCallback(() => setIsStartupOverlayVisible(false), []);
+  const startupProgress = isStartupTimedOut ? 1 : completedStartupSteps.length / STARTUP_STEPS.length;
+  const startupStatusText =
+    startupProgress >= 1
+      ? 'Ready'
+      : STARTUP_STEPS.find(step => !completedStartupSteps.includes(step.key))?.label || 'Loading...';
+  const startupOverlay = isStartupOverlayVisible ? (
+    <StartupProgressOverlay
+      progress={startupProgress}
+      statusText={startupStatusText}
+      theme={theme}
+      logo={appBrandLogo}
+      onHidden={hideStartupOverlay}
+    />
+  ) : null;
+
   const renderPageRefreshControl = (progressBackgroundColor = theme.panel) => (
     <RefreshControl
       refreshing={isPageRefreshing}
@@ -3171,6 +3386,15 @@ function MainApp() {
   useEffect(() => {
     let isMounted = true;
     const restoreSavedAuthSession = async () => {
+      try {
+        const storedGuestId = await loadOrCreateGuestId();
+        guestIdRef.current = storedGuestId;
+        if (isMounted) {
+          setGuestId(storedGuestId);
+        }
+      } catch {
+        // keep the in-memory guest id for this session
+      }
       try {
         const savedToken = String((await AsyncStorage.getItem(AUTH_TOKEN_STORAGE_KEY)) || '').trim();
         const savedUserRaw = await AsyncStorage.getItem(AUTH_USER_STORAGE_KEY);
@@ -3204,6 +3428,10 @@ function MainApp() {
         });
       } catch {
         await clearSavedAuthSession();
+      } finally {
+        if (isMounted) {
+          setIsSessionRestored(true);
+        }
       }
     };
 
@@ -3248,10 +3476,13 @@ function MainApp() {
   }, []);
 
   useEffect(() => {
+    if (!isSessionRestored) {
+      return;
+    }
     skipNextCartSyncRef.current = true;
     setIsStorefrontHydrated(false);
     loadStorefrontState();
-  }, [currentOwnerKey]);
+  }, [currentOwnerKey, isSessionRestored]);
 
   useEffect(() => {
     if (!isStorefrontHydrated) {
@@ -3261,7 +3492,17 @@ function MainApp() {
       skipNextCartSyncRef.current = false;
       return;
     }
-    syncCartToStorefront(cartItems);
+    const timer = setTimeout(() => {
+      cartSyncTimerRef.current = null;
+      syncCartToStorefront(cartItems);
+    }, CART_SYNC_DEBOUNCE_MS);
+    cartSyncTimerRef.current = timer;
+    return () => {
+      clearTimeout(timer);
+      if (cartSyncTimerRef.current === timer) {
+        cartSyncTimerRef.current = null;
+      }
+    };
   }, [cartItems, currentOwnerKey, isStorefrontHydrated]);
 
   useEffect(() => {
@@ -3306,9 +3547,29 @@ function MainApp() {
   }, [isPublicSearchModalVisible]);
 
   useEffect(() => {
-    loadPublicStock();
-    loadLocationProfile();
-  }, [token]);
+    if (!isSessionRestored) {
+      return;
+    }
+    void loadPublicStock().finally(() => markStartupStep('catalog'));
+    void loadLocationProfile().finally(() => markStartupStep('location'));
+  }, [token, isSessionRestored, markStartupStep]);
+
+  useEffect(() => {
+    if (isSessionRestored) {
+      markStartupStep('session');
+    }
+  }, [isSessionRestored, markStartupStep]);
+
+  useEffect(() => {
+    if (isStorefrontHydrated) {
+      markStartupStep('storefront');
+    }
+  }, [isStorefrontHydrated, markStartupStep]);
+
+  useEffect(() => {
+    const timer = setTimeout(() => setIsStartupTimedOut(true), STARTUP_MAX_WAIT_MS);
+    return () => clearTimeout(timer);
+  }, []);
 
   useEffect(() => {
     if (publicView !== 'feedback') {
@@ -3333,6 +3594,11 @@ function MainApp() {
     }
   }, [token, user]);
   useEffect(() => {
+    if (activeProfilePanel !== 'security') {
+      resetSecurityForm();
+    }
+  }, [activeProfilePanel]);
+  useEffect(() => {
     if (isAdminUser) {
       return;
     }
@@ -3348,8 +3614,8 @@ function MainApp() {
   }, [activeProfilePanel, isAdminUser]);
   useEffect(() => {
     if (!user) return;
-    setProfileName(user.name || 'Piyush Sharma');
-    setProfileEmail(user.username || 'piyush@email.com');
+    setProfileName(user.name || 'Customer');
+    setProfileEmail(user.username || '');
     if (registerPhone.trim()) {
       setProfilePhone(registerPhone.trim());
     }
@@ -4245,6 +4511,17 @@ function MainApp() {
     () => Boolean(selectedProduct && wishlistIds.includes(selectedProduct.id)),
     [selectedProduct, wishlistIds],
   );
+  const profileInitials = useMemo(() => {
+    const words = String(profileName || user?.name || '')
+      .trim()
+      .split(/\s+/)
+      .filter(Boolean);
+    const initials = words
+      .slice(0, 2)
+      .map(word => word.charAt(0).toUpperCase())
+      .join('');
+    return initials || '👤';
+  }, [profileName, user?.name]);
   const activeProfilePanelTitle = useMemo(() => {
     if (activeProfilePanel === 'orders') return 'My Orders';
     if (activeProfilePanel === 'wishlist') return 'Wishlist';
@@ -4256,6 +4533,7 @@ function MainApp() {
     if (activeProfilePanel === 'orderRequests') return 'Order Requests';
     if (activeProfilePanel === 'seller') return 'Seller Billing';
     if (activeProfilePanel === 'apiHealth') return 'API Health Check';
+    if (activeProfilePanel === 'security') return 'Privacy & Security';
     return 'Profile';
   }, [activeProfilePanel]);
   const cartSummary = useMemo(() => {
@@ -4357,6 +4635,21 @@ function MainApp() {
     }
     return [toast ? 3 : 2];
   }, [publicView, toast]);
+  // On Android the scroll view starts under the status bar, so the stuck search bar needs the inset as well.
+  const stickySearchTopGap = (Platform.OS === 'android' ? insets.top : 0) + 10;
+  const stickySearchBackdropOpacity = useMemo(
+    () =>
+      publicScrollY.interpolate({
+        inputRange: [Math.max(0, stickySearchOffsetY - 1), Math.max(1, stickySearchOffsetY)],
+        outputRange: [0, 1],
+        extrapolate: 'clamp',
+      }),
+    [publicScrollY, stickySearchOffsetY],
+  );
+  const handlePublicScroll = useMemo(
+    () => Animated.event([{ nativeEvent: { contentOffset: { y: publicScrollY } } }], { useNativeDriver: true }),
+    [publicScrollY],
+  );
   const filteredSavedLocations = useMemo(
     () => savedLocations.filter(loc => locationMatchesQuery(loc, locationSearch)),
     [savedLocations, locationSearch],
@@ -4389,13 +4682,15 @@ function MainApp() {
   if (!isAdminUser || isHomeModuleForAdmin) {
     return (
       <SafeAreaView style={[styles.safe, { backgroundColor: theme.bg }]}> 
-        <StatusBar barStyle="light-content" />
-        <ScrollView
+        <StatusBar barStyle={isDarkMode ? 'light-content' : 'dark-content'} />
+        <Animated.ScrollView
           key={`public_scroll_${publicView}`}
           ref={publicScrollRef}
           removeClippedSubviews={false}
           keyboardShouldPersistTaps="always"
           stickyHeaderIndices={landingSearchStickyHeaderIndices}
+          onScroll={handlePublicScroll}
+          scrollEventThrottle={16}
           refreshControl={renderPageRefreshControl(theme.panel)}
           contentContainerStyle={{
             paddingTop: Math.max(10, insets.top),
@@ -4490,13 +4785,33 @@ function MainApp() {
             </View>
           ) : null}
           {publicView !== 'feedback' && publicView !== 'categories' && publicView !== 'categoryProducts' && publicView !== 'offers' ? (
-            <View style={[styles.stickySearchWrap, { backgroundColor: theme.panel }]}>
+            <View
+              pointerEvents="box-none"
+              onLayout={event => setStickySearchOffsetY(event.nativeEvent.layout.y)}
+              style={[styles.stickySearchOuter, { marginTop: -stickySearchTopGap, paddingTop: stickySearchTopGap }]}
+            >
+              <Animated.View
+                pointerEvents="none"
+                style={[
+                  styles.stickySearchBackdrop,
+                  {
+                    top: -stickySearchTopGap,
+                    left: -horizontalScreenPadding,
+                    right: -horizontalScreenPadding,
+                    backgroundColor: theme.bg,
+                    opacity: stickySearchBackdropOpacity,
+                  },
+                ]}
+              />
+            <View style={styles.stickySearchWrap}>
               <Pressable
                 onPress={openPublicSearchModal}
                 style={[
                   styles.searchInput,
+                  styles.stickySearchField,
                   {
-                    backgroundColor: theme.panelSoft,
+                    backgroundColor: theme.panel,
+                    borderColor: theme.steel,
                     flexDirection: 'row',
                     alignItems: 'center',
                     justifyContent: 'space-between',
@@ -4522,6 +4837,7 @@ function MainApp() {
                 </Text>
                 <Text style={[styles.small, { color: theme.subtext, fontSize: 14 }]}>⌕</Text>
               </Pressable>
+            </View>
             </View>
           ) : null}
 
@@ -4598,7 +4914,7 @@ function MainApp() {
             />
           ) : null}
           <PoweredByFooter textColor={theme.subtext} borderColor={theme.steel} />
-        </ScrollView>
+        </Animated.ScrollView>
         {publicView !== 'feedback' && publicView !== 'categories' && publicView !== 'categoryProducts' ? (
           <PublicFooter
             theme={theme}
@@ -4744,7 +5060,16 @@ function MainApp() {
               contentContainerStyle={styles.profileContent}
             >
               <View style={[styles.profileUserCard, { backgroundColor: profileDarkMode ? '#111827' : '#FFFFFF' }]}>
-                <Image source={{ uri: 'https://i.pravatar.cc/240?img=12' }} style={styles.profileAvatar} resizeMode="cover" />
+                <View
+                  style={[
+                    styles.profileAvatar,
+                    styles.profileAvatarInitials,
+                    { backgroundColor: profileDarkMode ? '#14532D' : '#1E7B39', borderColor: profileDarkMode ? '#1F2937' : '#FFFFFF' },
+                  ]}
+                  accessibilityLabel="Profile picture"
+                >
+                  <Text style={styles.profileAvatarInitialsText}>{token && user ? profileInitials : '👤'}</Text>
+                </View>
                 {token && user ? (
                   <>
                     <View style={styles.profileUserInfo}>
@@ -4904,6 +5229,27 @@ function MainApp() {
                   <Text style={styles.profileMenuIcon}>🌐</Text>
                   <Text style={[styles.profileMenuLabel, { color: profileDarkMode ? '#F8FAFC' : '#111827' }]}>Language</Text>
                   <Text style={[styles.profileMenuRightText, { color: profileDarkMode ? '#CBD5E1' : '#374151' }]}>{profileLanguage}</Text>
+                  <Text style={[styles.profileMenuArrow, { color: profileDarkMode ? '#94A3B8' : '#6B7280' }]}>›</Text>
+                </Pressable>
+              </View>
+
+              <Text style={[styles.profileSectionTitle, { color: profileDarkMode ? '#E5E7EB' : '#111827' }]}>Privacy & Security</Text>
+              <View style={[styles.profileSectionCard, { backgroundColor: profileDarkMode ? '#111827' : '#FFFFFF' }]}>
+                {token && user ? (
+                  <>
+                    <Pressable style={styles.profileMenuRow} onPress={() => openProfilePanel('security')}>
+                      <Text style={styles.profileMenuIcon}>🔐</Text>
+                      <Text style={[styles.profileMenuLabel, { color: profileDarkMode ? '#F8FAFC' : '#111827' }]}>
+                        Password & Account
+                      </Text>
+                      <Text style={[styles.profileMenuArrow, { color: profileDarkMode ? '#94A3B8' : '#6B7280' }]}>›</Text>
+                    </Pressable>
+                    <View style={[styles.profileMenuDivider, { backgroundColor: profileDarkMode ? '#1F2937' : '#E5E7EB' }]} />
+                  </>
+                ) : null}
+                <Pressable style={styles.profileMenuRow} onPress={openPrivacyPolicy}>
+                  <Text style={styles.profileMenuIcon}>📄</Text>
+                  <Text style={[styles.profileMenuLabel, { color: profileDarkMode ? '#F8FAFC' : '#111827' }]}>Privacy Policy</Text>
                   <Text style={[styles.profileMenuArrow, { color: profileDarkMode ? '#94A3B8' : '#6B7280' }]}>›</Text>
                 </Pressable>
               </View>
@@ -5747,6 +6093,135 @@ function MainApp() {
                     </>
                   )}
                 </View>
+              ) : null}
+
+              {activeProfilePanel === 'security' ? (
+                <>
+                  <View
+                    style={[
+                      styles.profilePanelCard,
+                      { backgroundColor: orderDetailPalette.surface, borderColor: orderDetailPalette.border, gap: 8 },
+                    ]}
+                  >
+                    <Text style={[styles.profilePanelMain, { color: orderDetailPalette.title }]}>Change Password</Text>
+                    <Text style={[styles.profilePanelSub, { color: orderDetailPalette.subtext }]}>
+                      Other devices are signed out after the password changes.
+                    </Text>
+                    {[
+                      {
+                        key: 'current',
+                        value: securityCurrentPassword,
+                        onChange: setSecurityCurrentPassword,
+                        placeholder: 'Current password',
+                        autoComplete: 'current-password' as const,
+                        textContentType: 'password' as const,
+                      },
+                      {
+                        key: 'new',
+                        value: securityNewPassword,
+                        onChange: setSecurityNewPassword,
+                        placeholder: 'New password (min 6 characters)',
+                        autoComplete: 'new-password' as const,
+                        textContentType: 'newPassword' as const,
+                      },
+                      {
+                        key: 'confirm',
+                        value: securityConfirmPassword,
+                        onChange: setSecurityConfirmPassword,
+                        placeholder: 'Confirm new password',
+                        autoComplete: 'new-password' as const,
+                        textContentType: 'newPassword' as const,
+                      },
+                    ].map(field => (
+                      <TextInput
+                        key={field.key}
+                        value={field.value}
+                        onChangeText={field.onChange}
+                        placeholder={field.placeholder}
+                        placeholderTextColor={orderDetailPalette.subtext}
+                        secureTextEntry
+                        autoCapitalize="none"
+                        autoCorrect={false}
+                        autoComplete={field.autoComplete}
+                        textContentType={field.textContentType}
+                        style={[
+                          styles.profileEditInput,
+                          {
+                            color: orderDetailPalette.title,
+                            backgroundColor: orderDetailPalette.surfaceSoft,
+                            borderColor: orderDetailPalette.border,
+                          },
+                        ]}
+                      />
+                    ))}
+                    <Pressable
+                      style={[
+                        styles.profilePanelPrimaryBtn,
+                        { backgroundColor: orderDetailPalette.buttonBg, opacity: isSecuritySubmitting ? 0.7 : 1 },
+                      ]}
+                      onPress={submitChangePassword}
+                      disabled={isSecuritySubmitting}
+                    >
+                      <Text style={styles.profilePanelPrimaryText}>{isSecuritySubmitting ? 'Please wait...' : 'Update Password'}</Text>
+                    </Pressable>
+                  </View>
+
+                  <View
+                    style={[
+                      styles.profilePanelCard,
+                      { backgroundColor: orderDetailPalette.surface, borderColor: orderDetailPalette.border, gap: 8, marginTop: 12 },
+                    ]}
+                  >
+                    <Text style={[styles.profilePanelMain, { color: orderDetailPalette.title }]}>Delete Account</Text>
+                    {user?.role === 'customer' ? (
+                      <>
+                        <Text style={[styles.profilePanelSub, { color: orderDetailPalette.subtext }]}>
+                          Permanently removes your login, saved addresses, wishlist and payment methods. Orders and invoices
+                          are kept for tax records.
+                        </Text>
+                        <TextInput
+                          value={deleteAccountPassword}
+                          onChangeText={setDeleteAccountPassword}
+                          placeholder="Enter password to confirm"
+                          placeholderTextColor={orderDetailPalette.subtext}
+                          secureTextEntry
+                          autoCapitalize="none"
+                          autoCorrect={false}
+                          autoComplete="current-password"
+                          textContentType="password"
+                          style={[
+                            styles.profileEditInput,
+                            {
+                              color: orderDetailPalette.title,
+                              backgroundColor: orderDetailPalette.surfaceSoft,
+                              borderColor: orderDetailPalette.border,
+                            },
+                          ]}
+                        />
+                        <Pressable
+                          style={[
+                            styles.profilePanelPrimaryBtn,
+                            { backgroundColor: '#B91C1C', opacity: isSecuritySubmitting ? 0.7 : 1 },
+                          ]}
+                          onPress={confirmDeleteAccount}
+                          disabled={isSecuritySubmitting}
+                        >
+                          <Text style={styles.profilePanelPrimaryText}>Delete My Account</Text>
+                        </Pressable>
+                      </>
+                    ) : (
+                      <Text style={[styles.profilePanelSub, { color: orderDetailPalette.subtext }]}>
+                        Staff and admin accounts are managed by the business owner. Contact support to remove this account.
+                      </Text>
+                    )}
+                  </View>
+
+                  <Pressable style={{ alignSelf: 'center', paddingVertical: 14 }} onPress={openPrivacyPolicy}>
+                    <Text style={[styles.profilePanelSub, { color: orderDetailPalette.accentText, fontSize: 13 }]}>
+                      Read our Privacy Policy
+                    </Text>
+                  </Pressable>
+                </>
               ) : null}
 
               {activeProfilePanel === 'apiHealth' ? (
@@ -6621,6 +7096,10 @@ function MainApp() {
                 onChangeText={setProfileDraftEmail}
                 placeholder="Email Address"
                 autoCapitalize="none"
+                autoCorrect={false}
+                keyboardType="email-address"
+                autoComplete="email"
+                textContentType="emailAddress"
                 placeholderTextColor="#6B7280"
                 style={styles.profileEditInput}
               />
@@ -6629,6 +7108,9 @@ function MainApp() {
                 onChangeText={setProfileDraftPhone}
                 placeholder="Phone Number"
                 keyboardType="phone-pad"
+                autoComplete="tel"
+                textContentType="telephoneNumber"
+                maxLength={15}
                 placeholderTextColor="#6B7280"
                 style={styles.profileEditInput}
               />
@@ -6836,6 +7318,10 @@ function MainApp() {
                         placeholder="Full Name"
                         placeholderTextColor="#6B7280"
                         style={styles.authInputField}
+                        autoCapitalize="words"
+                        autoComplete="name"
+                        textContentType="name"
+                        returnKeyType="next"
                       />
                     </View>
                     <View style={styles.authInputWrap}>
@@ -6847,6 +7333,11 @@ function MainApp() {
                         placeholderTextColor="#6B7280"
                         style={styles.authInputField}
                         autoCapitalize="none"
+                        autoCorrect={false}
+                        keyboardType="email-address"
+                        autoComplete="email"
+                        textContentType="emailAddress"
+                        returnKeyType="next"
                       />
                     </View>
                     <View style={styles.authInputWrap}>
@@ -6857,6 +7348,9 @@ function MainApp() {
                         placeholder="Phone Number"
                         placeholderTextColor="#6B7280"
                         keyboardType="phone-pad"
+                        autoComplete="tel"
+                        textContentType="telephoneNumber"
+                        maxLength={15}
                         style={styles.authInputField}
                       />
                     </View>
@@ -6868,6 +7362,10 @@ function MainApp() {
                         secureTextEntry={!isRegisterPasswordVisible}
                         autoCapitalize="none"
                         autoCorrect={false}
+                        autoComplete="new-password"
+                        textContentType="newPassword"
+                        returnKeyType="go"
+                        onSubmitEditing={() => !isLoading && void register()}
                         placeholder="Password"
                         placeholderTextColor="#6B7280"
                         style={styles.authInputField}
@@ -6898,19 +7396,6 @@ function MainApp() {
                         </Text>
                       </Text>
                     </View>
-                    <View style={styles.authDividerRow}>
-                      <View style={[styles.authDividerLine, { backgroundColor: theme.steel }]} />
-                      <Text style={[styles.authDividerText, { color: theme.subtext }]}>or register with</Text>
-                      <View style={[styles.authDividerLine, { backgroundColor: theme.steel }]} />
-                    </View>
-                    <Pressable style={styles.authSocialBtn} onPress={() => handleSocialAuthPress('Google')}>
-                      <Text style={styles.authSocialEmoji}>G</Text>
-                      <Text style={styles.authSocialText}>Sign up with Google</Text>
-                    </Pressable>
-                    <Pressable style={styles.authSocialBtnFb} onPress={() => handleSocialAuthPress('Facebook')}>
-                      <Text style={styles.authSocialEmojiFb}>f</Text>
-                      <Text style={styles.authSocialTextFb}>Sign up with Facebook</Text>
-                    </Pressable>
                   </>
                 ) : authMode === 'forgot' ? (
                   <>
@@ -6923,7 +7408,12 @@ function MainApp() {
                         placeholderTextColor="#6B7280"
                         style={styles.authInputField}
                         autoCapitalize="none"
+                        autoCorrect={false}
                         keyboardType="email-address"
+                        autoComplete="email"
+                        textContentType="emailAddress"
+                        returnKeyType="send"
+                        onSubmitEditing={() => !isLoading && void requestPasswordReset()}
                       />
                     </View>
                     <Text style={[styles.authHint, { color: theme.subtext }]}>
@@ -6956,6 +7446,11 @@ function MainApp() {
                         placeholderTextColor="#6B7280"
                         style={styles.authInputField}
                         autoCapitalize="none"
+                        autoCorrect={false}
+                        keyboardType="email-address"
+                        autoComplete="username"
+                        textContentType="username"
+                        returnKeyType="next"
                       />
                     </View>
                     <View style={styles.authInputWrap}>
@@ -6966,6 +7461,10 @@ function MainApp() {
                         secureTextEntry={!isLoginPasswordVisible}
                         autoCapitalize="none"
                         autoCorrect={false}
+                        autoComplete="current-password"
+                        textContentType="password"
+                        returnKeyType="go"
+                        onSubmitEditing={() => !isLoading && void login()}
                         placeholder="Password"
                         placeholderTextColor="#6B7280"
                         style={styles.authInputField}
@@ -7005,19 +7504,6 @@ function MainApp() {
                         </Text>
                       </Text>
                     </View>
-                    <View style={styles.authDividerRow}>
-                      <View style={[styles.authDividerLine, { backgroundColor: theme.steel }]} />
-                      <Text style={[styles.authDividerText, { color: theme.subtext }]}>or login with</Text>
-                      <View style={[styles.authDividerLine, { backgroundColor: theme.steel }]} />
-                    </View>
-                    <Pressable style={styles.authSocialBtn} onPress={() => handleSocialAuthPress('Google')}>
-                      <Text style={styles.authSocialEmoji}>G</Text>
-                      <Text style={styles.authSocialText}>Sign in with Google</Text>
-                    </Pressable>
-                    <Pressable style={styles.authSocialBtnFb} onPress={() => handleSocialAuthPress('Facebook')}>
-                      <Text style={styles.authSocialEmojiFb}>f</Text>
-                      <Text style={styles.authSocialTextFb}>Sign in with Facebook</Text>
-                    </Pressable>
                   </>
                 )}
               </Animated.View>
@@ -7271,16 +7757,13 @@ function MainApp() {
 
                     <View style={[styles.detailSheet, { backgroundColor: theme.panel }]}>
                       <Text style={[styles.detailTitle, { color: theme.text }]}>{selectedProduct.name}</Text>
-                      <View style={styles.ratingRow}>
-                        <Text style={styles.ratingStar}>★</Text>
-                        <Text style={[styles.ratingText, { color: theme.text }]}>4.9</Text>
-                        <Text style={[styles.small, { color: theme.subtext }]}>(1200+ Reviews)</Text>
-                        {isSelectedProductPremium ? (
+                      {isSelectedProductPremium ? (
+                        <View style={styles.ratingRow}>
                           <View style={[styles.premiumPill, detailPageStyles.premiumPill]}>
                             <Text style={[styles.premiumPillText, detailPageStyles.premiumPillText]}>Premium</Text>
                           </View>
-                        ) : null}
-                      </View>
+                        </View>
+                      ) : null}
 
                       {(() => {
                         const detailPrice = getDetailPrice(selectedProduct);
@@ -7522,6 +8005,47 @@ function MainApp() {
                     })}
                   </View>
 
+                  {!token || !user ? (
+                    <View style={[styles.checkoutTotalsCard, { backgroundColor: theme.panel, borderColor: theme.steel, gap: 8 }]}>
+                      <Text style={[styles.checkoutSummaryLabel, { color: theme.text, fontWeight: '800' }]}>
+                        Contact details for delivery
+                      </Text>
+                      <TextInput
+                        value={checkoutFirstName}
+                        onChangeText={setCheckoutFirstName}
+                        placeholder="Full name"
+                        placeholderTextColor={theme.subtext}
+                        autoCapitalize="words"
+                        autoComplete="name"
+                        textContentType="name"
+                        style={[styles.profileEditInput, { color: theme.text, backgroundColor: theme.panelSoft, borderColor: theme.steel }]}
+                      />
+                      <TextInput
+                        value={checkoutPhone}
+                        onChangeText={setCheckoutPhone}
+                        placeholder="Mobile number"
+                        placeholderTextColor={theme.subtext}
+                        keyboardType="phone-pad"
+                        autoComplete="tel"
+                        textContentType="telephoneNumber"
+                        maxLength={15}
+                        style={[styles.profileEditInput, { color: theme.text, backgroundColor: theme.panelSoft, borderColor: theme.steel }]}
+                      />
+                      <TextInput
+                        value={checkoutEmail}
+                        onChangeText={setCheckoutEmail}
+                        placeholder="Email (optional, for invoice)"
+                        placeholderTextColor={theme.subtext}
+                        autoCapitalize="none"
+                        autoCorrect={false}
+                        keyboardType="email-address"
+                        autoComplete="email"
+                        textContentType="emailAddress"
+                        style={[styles.profileEditInput, { color: theme.text, backgroundColor: theme.panelSoft, borderColor: theme.steel }]}
+                      />
+                    </View>
+                  ) : null}
+
                   <View style={[styles.checkoutTotalsCard, { backgroundColor: theme.panel, borderColor: theme.steel }]}>
                     <View style={styles.checkoutSummaryRow}>
                       <Text style={[styles.checkoutSummaryLabel, { color: theme.subtext }]}>Subtotal</Text>
@@ -7710,13 +8234,14 @@ function MainApp() {
             </Animated.View>
           </SafeAreaView>
         </Modal>
+        {startupOverlay}
       </SafeAreaView>
     );
   }
 
   return (
     <SafeAreaView style={[styles.safe, { backgroundColor: theme.bg }]}> 
-      <StatusBar barStyle="light-content" />
+      <StatusBar barStyle={isDarkMode ? 'light-content' : 'dark-content'} />
       <ScrollView
         removeClippedSubviews
         keyboardShouldPersistTaps="always"
@@ -7910,6 +8435,7 @@ function MainApp() {
         />
         <PoweredByFooter textColor={theme.subtext} borderColor={theme.steel} />
       </ScrollView>
+      {startupOverlay}
     </SafeAreaView>
   );
 }

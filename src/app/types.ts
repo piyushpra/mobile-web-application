@@ -34,7 +34,8 @@ export type ProfilePanel =
   | 'language'
   | 'orderRequests'
   | 'seller'
-  | 'apiHealth';
+  | 'apiHealth'
+  | 'security';
 
 export type Theme = {
   bg: string;

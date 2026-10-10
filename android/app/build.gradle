@@ -58,8 +58,8 @@ react {
  * Set this to true to Run Proguard on Release builds to minify the Java bytecode.
  */
 def enableProguardInReleaseBuilds = true
-def trackedVersionCode = 3
-def trackedVersionName = "1.0.2"
+def trackedVersionCode = 4
+def trackedVersionName = "1.0.3"
 def releaseVersionCode = project.hasProperty('VERSION_CODE_OVERRIDE')
     ? Integer.parseInt(String.valueOf(VERSION_CODE_OVERRIDE))
     : trackedVersionCode
@@ -92,6 +92,7 @@ android {
         targetSdkVersion rootProject.ext.targetSdkVersion
         versionCode releaseVersionCode
         versionName releaseVersionName
+        buildConfigField "boolean", "STORE_DISTRIBUTION", "false"
     }
     signingConfigs {
         debug {
@@ -120,6 +121,12 @@ android {
             minifyEnabled enableProguardInReleaseBuilds
             shrinkResources enableProguardInReleaseBuilds
             proguardFiles getDefaultProguardFile("proguard-android.txt"), "proguard-rules.pro"
+        }
+        // Google Play build: `./gradlew bundlePlay`. Updates come from the store, so the APK self-updater is disabled.
+        play {
+            initWith release
+            matchingFallbacks = ['release']
+            buildConfigField "boolean", "STORE_DISTRIBUTION", "true"
         }
     }
 }

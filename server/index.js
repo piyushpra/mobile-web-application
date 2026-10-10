@@ -1,4 +1,5 @@
 const http = require('http');
+const { Buffer } = require('buffer');
 const { URL } = require('url');
 const fs = require('fs');
 const path = require('path');
@@ -29,6 +30,8 @@ const SMTP_SECURE = config.mail.secure;
 const SMTP_USER = config.mail.user;
 const SMTP_PASSWORD = config.mail.password;
 const SMTP_FROM = config.mail.from;
+const SUPPORT_EMAIL = config.support.email;
+const SUPPORT_PHONE = config.support.phone;
 const STATIC_URL_PREFIX = '/static/';
 const STATIC_ROOT = path.join(__dirname, 'data', 'generated');
 const ITEM_UPLOAD_DIR = path.join(STATIC_ROOT, 'product-images', 'items');
@@ -37,6 +40,12 @@ const MAX_ITEM_UPLOAD_BYTES = config.uploads.maxItemUploadBytes;
 const APP_UPDATE_MANIFEST_PATH = path.join(__dirname, 'data', 'app_update_manifest.json');
 const APP_UPDATE_RUNTIME_MANIFEST_PATH = path.join(STATIC_ROOT, 'app_update_manifest.json');
 const APP_UPDATE_MANIFEST_CACHE_MS = config.appUpdateManifestCacheMs;
+const MAX_JSON_BODY_BYTES = Math.max(64 * 1024, config.maxJsonBodyBytes);
+const LOGIN_FAILURE_WINDOW_MS = 15 * 60 * 1000;
+const LOGIN_MAX_FAILURES_PER_ACCOUNT = 8;
+const LOGIN_MAX_FAILURES_PER_IP = 40;
+const GUEST_ID_PATTERN = /^[A-Za-z0-9_-]{6,60}$/;
+const LOCATION_SOURCES = new Set(['default', 'manual', 'gps', 'network', 'search']);
 
 const mysqlPool = mysql.createPool({
   host: MYSQL_HOST,
@@ -88,8 +97,10 @@ let appUpdateManifestCache = null;
 let appUpdateManifestLoadedAt = 0;
 
 let writeQueue = Promise.resolve();
+let dbMutationChain = Promise.resolve();
 let mailTransport = null;
 const passwordResetRequestLimiter = new Map();
+const loginFailureLog = new Map();
 
 const PASSWORD_HASH_ALGORITHM = 'scrypt';
 const PASSWORD_HASH_KEYLEN = 64;
@@ -134,10 +145,12 @@ const DEFAULT_INVOICE_SELLER = Object.freeze({
   footerNote: '',
 });
 const INVOICE_DOWNLOAD_LINK_TTL_MS = 1000 * 60 * 15;
-const INVOICE_DOWNLOAD_SECRET = crypto
-  .createHash('sha256')
-  .update(`${MYSQL_PASSWORD}|${APP_NAME}|invoice-download`)
-  .digest('hex');
+const INVOICE_DOWNLOAD_SECRET =
+  config.auth.invoiceDownloadSecret ||
+  crypto
+    .createHash('sha256')
+    .update(`${MYSQL_PASSWORD}|${APP_NAME}|invoice-download`)
+    .digest('hex');
 
 const NUMBER_WORDS_ONES = [
   'zero',
@@ -765,13 +778,72 @@ function escapeHtml(value) {
 }
 
 function getClientIp(req) {
-  const forwarded = String(req?.headers?.['x-forwarded-for'] || '')
-    .split(',')[0]
-    .trim();
-  if (forwarded) {
-    return forwarded;
+  // Nginx overwrites X-Real-IP, while the first X-Forwarded-For entry is client-controlled.
+  const realIp = String(req?.headers?.['x-real-ip'] || '').trim();
+  if (realIp) {
+    return realIp;
+  }
+  const forwardedParts = String(req?.headers?.['x-forwarded-for'] || '')
+    .split(',')
+    .map(part => part.trim())
+    .filter(Boolean);
+  if (forwardedParts.length > 0) {
+    return forwardedParts[forwardedParts.length - 1];
   }
   return String(req?.socket?.remoteAddress || '').trim() || 'unknown';
+}
+
+function getLoginThrottleKeys(req, username) {
+  const ip = getClientIp(req);
+  return {
+    accountKey: `acct|${ip}|${String(username || '').trim().toLowerCase()}`,
+    ipKey: `ip|${ip}`,
+  };
+}
+
+function readLoginFailureCount(key, now) {
+  const entry = loginFailureLog.get(key);
+  if (!entry) {
+    return 0;
+  }
+  if (now - entry.firstAt > LOGIN_FAILURE_WINDOW_MS) {
+    loginFailureLog.delete(key);
+    return 0;
+  }
+  return entry.count;
+}
+
+function enforceLoginThrottle(req, username) {
+  const now = Date.now();
+  const { accountKey, ipKey } = getLoginThrottleKeys(req, username);
+  if (
+    readLoginFailureCount(accountKey, now) >= LOGIN_MAX_FAILURES_PER_ACCOUNT ||
+    readLoginFailureCount(ipKey, now) >= LOGIN_MAX_FAILURES_PER_IP
+  ) {
+    throw createHttpError(429, 'Too many failed login attempts. Please try again in 15 minutes.');
+  }
+}
+
+function recordLoginFailure(req, username) {
+  const now = Date.now();
+  if (loginFailureLog.size > 5000) {
+    for (const [key, entry] of loginFailureLog.entries()) {
+      if (now - entry.firstAt > LOGIN_FAILURE_WINDOW_MS) {
+        loginFailureLog.delete(key);
+      }
+    }
+  }
+  const { accountKey, ipKey } = getLoginThrottleKeys(req, username);
+  for (const key of [accountKey, ipKey]) {
+    const count = readLoginFailureCount(key, now);
+    const entry = loginFailureLog.get(key);
+    loginFailureLog.set(key, { count: count + 1, firstAt: entry && count > 0 ? entry.firstAt : now });
+  }
+}
+
+function clearLoginFailures(req, username) {
+  const { accountKey } = getLoginThrottleKeys(req, username);
+  loginFailureLog.delete(accountKey);
 }
 
 function getAuthBaseUrl(req) {
@@ -1008,6 +1080,106 @@ function renderResetPasswordPage(token, errorMessage = '') {
     </script>
   </body>
 </html>`;
+}
+
+function renderSupportContactHtml() {
+  const lines = [];
+  if (SUPPORT_EMAIL) {
+    lines.push(`Email: <a href="mailto:${escapeHtml(SUPPORT_EMAIL)}">${escapeHtml(SUPPORT_EMAIL)}</a>`);
+  }
+  if (SUPPORT_PHONE) {
+    lines.push(`Phone: ${escapeHtml(SUPPORT_PHONE)}`);
+  }
+  return lines.length > 0 ? `<p>${lines.join('<br />')}</p>` : '<p>Use the Help &amp; Support option inside the app.</p>';
+}
+
+function renderInfoPage(title, bodyHtml) {
+  const safeAppName = escapeHtml(APP_NAME);
+  return `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>${safeAppName} - ${escapeHtml(title)}</title>
+    <style>
+      body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #f3f4f6; color: #111827; line-height: 1.6; }
+      main { max-width: 760px; margin: 0 auto; padding: 32px 20px 48px; }
+      .card { background: #fff; border-radius: 16px; padding: 24px 22px; box-shadow: 0 10px 30px rgba(17,24,39,.08); }
+      h1 { margin: 4px 0 16px; font-size: 26px; }
+      h2 { margin: 24px 0 8px; font-size: 18px; }
+      p, li { color: #374151; font-size: 15px; }
+      ul { padding-left: 20px; }
+      .app { margin: 0; color: #6b7280; font-size: 13px; font-weight: 600; text-transform: uppercase; letter-spacing: .06em; }
+      .muted { color: #6b7280; font-size: 13px; }
+      a { color: #1d4ed8; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <div class="card">
+        <p class="app">${safeAppName}</p>
+        <h1>${escapeHtml(title)}</h1>
+        ${bodyHtml}
+      </div>
+    </main>
+  </body>
+</html>`;
+}
+
+function renderPrivacyPolicyPage() {
+  return renderInfoPage(
+    'Privacy Policy',
+    `<p>This policy explains what information the ${escapeHtml(APP_NAME)} app collects, why it is collected, and the choices you have.</p>
+     <h2>Information we collect</h2>
+     <ul>
+       <li><strong>Account details</strong> you provide when registering: name, email address (used as your username), phone number and password (stored only as a one-way hash).</li>
+       <li><strong>Order details</strong> needed to deliver and invoice your purchases: billing and shipping addresses, items ordered and payment method type. Card numbers are never stored.</li>
+       <li><strong>Approximate location</strong> (city and pincode) that you select or that is estimated from your network, used to show delivery availability. Precise GPS location is not collected.</li>
+       <li><strong>Service requests</strong> such as installation, warranty claims and feedback you submit.</li>
+       <li><strong>Technical data</strong> such as app version and error logs used to keep the service working.</li>
+     </ul>
+     <h2>How we use it</h2>
+     <ul>
+       <li>To create and secure your account, process orders, generate GST invoices and provide warranty and installation support.</li>
+       <li>To send order updates and, only if you enable them, promotional notifications.</li>
+     </ul>
+     <p>We do not sell your personal information and do not use it for third-party advertising.</p>
+     <h2>Sharing</h2>
+     <p>Information is shared only with service providers needed to run the app (hosting, email delivery) and with authorities when required by law.</p>
+     <h2>Security and retention</h2>
+     <p>Passwords are hashed and sessions can be revoked at any time by signing out or changing your password. Order and invoice records are kept for as long as required by tax law; other data is kept while your account is active.</p>
+     <h2>Your choices</h2>
+     <ul>
+       <li>Update your profile and notification preferences from the Profile screen.</li>
+       <li>Delete your account at any time from <strong>Profile &gt; Delete Account</strong>. See <a href="/account-deletion">account deletion</a> for details.</li>
+     </ul>
+     <h2>Contact</h2>
+     ${renderSupportContactHtml()}`,
+  );
+}
+
+function renderAccountDeletionPage() {
+  return renderInfoPage(
+    'Delete Your Account',
+    `<p>You can permanently delete your ${escapeHtml(APP_NAME)} account directly from the app.</p>
+     <h2>How to delete</h2>
+     <ul>
+       <li>Open the app and sign in.</li>
+       <li>Go to <strong>Profile &gt; Delete Account</strong>.</li>
+       <li>Confirm with your password.</li>
+     </ul>
+     <p>If you can no longer sign in, contact support from the email or phone number linked to your account and we will delete it for you.</p>
+     <h2>What is deleted</h2>
+     <ul>
+       <li>Your login, name, email and phone number on the account.</li>
+       <li>Saved payment methods, wishlist, cart, saved locations and preferences.</li>
+       <li>All active sessions on every device.</li>
+     </ul>
+     <h2>What is kept</h2>
+     <p>Orders, invoices and warranty records are retained without your login as required by tax and consumer-protection law.</p>
+     <h2>Contact</h2>
+     ${renderSupportContactHtml()}`,
+  );
 }
 
 function getDefaultAppUpdateManifest() {
@@ -1396,18 +1568,9 @@ function normalizeLocationProfile(profile) {
   };
 }
 
-function normalizeDb(db) {
-  const safe = {
-    ...defaultDb,
-    ...(db || {}),
-  };
-
-  const baseSuggestions = DEFAULT_LOCATION_SUGGESTIONS.map(normalizeLocation);
-  const existingSuggestions = Array.isArray(safe.locationSuggestions)
-    ? safe.locationSuggestions.map(normalizeLocation)
-    : [];
-  const mergedSuggestions = [...existingSuggestions];
-  for (const seed of baseSuggestions) {
+function mergeDefaultLocationSuggestions(suggestions) {
+  const mergedSuggestions = (Array.isArray(suggestions) ? suggestions : []).map(normalizeLocation);
+  for (const seed of DEFAULT_LOCATION_SUGGESTIONS.map(normalizeLocation)) {
     const exists = mergedSuggestions.some(item => {
       if (item.id === seed.id) return true;
       const p1 = String(item.pincode || '').trim();
@@ -1418,6 +1581,16 @@ function normalizeDb(db) {
       mergedSuggestions.push(seed);
     }
   }
+  return mergedSuggestions;
+}
+
+function normalizeDb(db) {
+  const safe = {
+    ...defaultDb,
+    ...(db || {}),
+  };
+
+  const mergedSuggestions = mergeDefaultLocationSuggestions(safe.locationSuggestions);
 
   return {
     ...safe,
@@ -1572,8 +1745,10 @@ async function ensureStorefrontCustomer(conn, owner, checkoutProfile) {
   const billingAddress = compactText(checkoutProfile.billingAddress);
   const shippingAddress = compactText(checkoutProfile.shippingAddress) || billingAddress;
 
+  // Guests are unauthenticated, so they must never merge into (and overwrite) an existing customer by email/phone.
+  const canMatchExisting = Boolean(owner?.userId);
   let existing = null;
-  if (email) {
+  if (email && canMatchExisting) {
     const [rows] = await conn.query(
       `SELECT id, name, company, email, phone, gstin, billing_address, shipping_address
        FROM customers
@@ -1584,7 +1759,7 @@ async function ensureStorefrontCustomer(conn, owner, checkoutProfile) {
     );
     existing = Array.isArray(rows) ? rows[0] || null : null;
   }
-  if (!existing && phone) {
+  if (!existing && phone && canMatchExisting) {
     const [rows] = await conn.query(
       `SELECT id, name, company, email, phone, gstin, billing_address, shipping_address
        FROM customers
@@ -3256,13 +3431,19 @@ async function ensureDb() {
          VALUES ('PO', 1), ('SO', 1), ('BILL', 1), ('INV', 1)`,
       );
 
-      for (const u of DEFAULT_USERS) {
-        const storedPassword = await ensurePasswordHash(u.password);
-        await conn.query(
-          `INSERT IGNORE INTO users (id, username, password_hash, role, full_name, is_active)
-           VALUES (?, ?, ?, ?, ?, 1)`,
-          [u.id, u.username, storedPassword, u.role, u.name],
-        );
+      // Seed the demo accounts only on a brand-new database so deleted defaults are not recreated.
+      const [adminCountRows] = await conn.query(`SELECT COUNT(*) AS total FROM users WHERE role = 'admin'`);
+      const hasAdmin = parseNumber(Array.isArray(adminCountRows) ? adminCountRows[0]?.total : 0, 0) > 0;
+      if (!hasAdmin) {
+        for (const u of DEFAULT_USERS) {
+          const seedPassword = u.role === 'admin' && config.auth.initialAdminPassword ? config.auth.initialAdminPassword : u.password;
+          const storedPassword = await ensurePasswordHash(seedPassword);
+          await conn.query(
+            `INSERT IGNORE INTO users (id, username, password_hash, role, full_name, is_active)
+             VALUES (?, ?, ?, ?, ?, 1)`,
+            [u.id, u.username, storedPassword, u.role, u.name],
+          );
+        }
       }
 
       const [userPasswordRows] = await conn.query(
@@ -3525,6 +3706,255 @@ async function fetchInvoicesByOrderIds(conn, orderIds) {
   return invoicesByOrder;
 }
 
+function mapProductRowToItem(row, imagesByProduct) {
+  return normalizeItem({
+    id: row.id,
+    itemType: row.item_type,
+    name: row.name,
+    model: row.model,
+    capacityAh: row.capacity_ah,
+    technologyOption: row.technology_option,
+    sku: row.sku,
+    category: row.category,
+    unit: row.unit,
+    brand: row.brand,
+    tags: row.tags,
+    description: row.description,
+    images: imagesByProduct.get(row.id) || [],
+    hsnCode: row.hsn_code,
+    location: row.location,
+    qty: parseNumber(row.qty_on_hand, 0),
+    reorderPoint: parseNumber(row.reorder_point, 0),
+    purchasePrice: parseNumber(row.purchase_price, 0),
+    sellingPrice: parseNumber(row.selling_price, 0),
+    taxRate: parseNumber(row.tax_rate, 0),
+    updatedAt: toIso(row.updated_at),
+  });
+}
+
+function groupImagesByProduct(imageRows) {
+  const imagesByProduct = new Map();
+  for (const row of imageRows) {
+    const list = imagesByProduct.get(row.product_id) || [];
+    list.push(row.image_url);
+    imagesByProduct.set(row.product_id, list);
+  }
+  return imagesByProduct;
+}
+
+// Storefront routes only need products and images, not the full readDb() snapshot.
+async function readCatalogItems() {
+  await ensureDb();
+  const [[productRows], [imageRows]] = await Promise.all([
+    mysqlPool.query(
+      `SELECT id, item_type, name, model, capacity_ah, technology_option, sku, category, unit, brand, tags, description, hsn_code,
+              location, qty_on_hand, reorder_point, purchase_price, selling_price, tax_rate, updated_at
+       FROM products
+       ORDER BY updated_at DESC`,
+    ),
+    mysqlPool.query(
+      `SELECT id, product_id, image_url, sort_order
+       FROM product_images
+       ORDER BY product_id, sort_order`,
+    ),
+  ]);
+  const imagesByProduct = groupImagesByProduct(imageRows);
+  return productRows.map(row => mapProductRowToItem(row, imagesByProduct));
+}
+
+async function readLocationSuggestions(conn = mysqlPool) {
+  const [rows] = await conn.query(
+    `SELECT l.id, l.label, l.area, l.city, l.state, l.country, l.pincode, l.lat, l.lng, l.source, l.updated_at
+     FROM location_suggestions ls
+     INNER JOIN locations l ON l.id = ls.location_id
+     ORDER BY ls.rank_score DESC, ls.created_at DESC`,
+  );
+  return mergeDefaultLocationSuggestions((Array.isArray(rows) ? rows : []).map(mapLocationRow));
+}
+
+function mapLocationRow(row) {
+  return normalizeLocation({
+    id: row.id,
+    label: row.label,
+    area: row.area,
+    city: row.city,
+    state: row.state,
+    country: row.country,
+    pincode: row.pincode,
+    lat: row.lat != null ? Number(row.lat) : null,
+    lng: row.lng != null ? Number(row.lng) : null,
+    source: row.source,
+    updatedAt: toIso(row.updated_at),
+  });
+}
+
+async function fetchLocationProfile(conn, owner) {
+  const ownerWhere = buildOwnerCondition(owner);
+  const [profileRows] = await conn.query(
+    `SELECT lp.id, lp.user_id, lp.guest_id, lp.updated_at,
+            l.id AS loc_id, l.label, l.area, l.city, l.state, l.country, l.pincode, l.lat, l.lng, l.source,
+            l.updated_at AS loc_updated_at
+     FROM location_profiles lp
+     LEFT JOIN locations l ON l.id = lp.current_location_id
+     WHERE ${ownerWhere.sql.replace(/\b(user_id|guest_id)\b/g, 'lp.$1')}
+     LIMIT 1`,
+    ownerWhere.params,
+  );
+  const profileRow = Array.isArray(profileRows) ? profileRows[0] : null;
+  if (!profileRow) {
+    return null;
+  }
+  const [[savedRows], [recentRows]] = await Promise.all([
+    conn.query(
+      `SELECT l.id, l.label, l.area, l.city, l.state, l.country, l.pincode, l.lat, l.lng, l.source, l.updated_at
+       FROM location_saved ls
+       INNER JOIN locations l ON l.id = ls.location_id
+       WHERE ls.profile_id = ?
+       ORDER BY ls.created_at DESC`,
+      [profileRow.id],
+    ),
+    conn.query(
+      `SELECT l.id, l.label, l.area, l.city, l.state, l.country, l.pincode, l.lat, l.lng, l.source, l.updated_at
+       FROM location_recent lr
+       INNER JOIN locations l ON l.id = lr.location_id
+       WHERE lr.profile_id = ?
+       ORDER BY lr.seen_at DESC`,
+      [profileRow.id],
+    ),
+  ]);
+  return normalizeLocationProfile({
+    id: profileRow.id,
+    userId: profileRow.user_id || null,
+    guestId: profileRow.guest_id || null,
+    currentLocation: profileRow.loc_id
+      ? mapLocationRow({ ...profileRow, id: profileRow.loc_id, updated_at: profileRow.loc_updated_at })
+      : null,
+    savedLocations: savedRows.map(mapLocationRow),
+    recentLocations: recentRows.map(mapLocationRow),
+    updatedAt: toIso(profileRow.updated_at),
+  });
+}
+
+function buildDefaultLocationProfile(owner) {
+  return normalizeLocationProfile({
+    id: `lp_${crypto.randomUUID().slice(0, 8)}`,
+    userId: owner.userId || null,
+    guestId: owner.guestId || null,
+    currentLocation: {
+      id: 'loc_default_new_delhi',
+      city: 'New Delhi',
+      state: 'Delhi',
+      country: 'India',
+      pincode: '110001',
+      label: 'New Delhi, India',
+      source: 'default',
+    },
+    savedLocations: [],
+    recentLocations: [],
+  });
+}
+
+// Inserts a client-supplied location without letting it overwrite a different shared location row.
+async function ensureLocationRow(conn, rawLocation) {
+  let location = normalizeLocation(rawLocation);
+  if (!LOCATION_SOURCES.has(location.source)) {
+    location = { ...location, source: 'manual' };
+  }
+  if (!/^[A-Za-z0-9_.:-]{1,60}$/.test(location.id)) {
+    location = { ...location, id: `loc_${crypto.randomUUID().slice(0, 8)}` };
+  }
+  const [rows] = await conn.query(`SELECT id, label FROM locations WHERE id = ? LIMIT 1`, [location.id]);
+  const existing = Array.isArray(rows) ? rows[0] : null;
+  if (existing && String(existing.label || '').toLowerCase() === location.label.toLowerCase()) {
+    return location;
+  }
+  if (existing) {
+    location = { ...location, id: `loc_${crypto.randomUUID().slice(0, 8)}` };
+  }
+  await conn.query(
+    `INSERT INTO locations
+      (id, label, area, city, state, country, pincode, lat, lng, source)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      location.id,
+      location.label.slice(0, 220),
+      location.area ? location.area.slice(0, 120) : null,
+      location.city ? location.city.slice(0, 120) : null,
+      location.state ? location.state.slice(0, 120) : null,
+      (location.country || 'India').slice(0, 120),
+      location.pincode ? location.pincode.slice(0, 12) : null,
+      Number.isFinite(location.lat) && Math.abs(location.lat) <= 90 ? location.lat : null,
+      Number.isFinite(location.lng) && Math.abs(location.lng) <= 180 ? location.lng : null,
+      location.source,
+    ],
+  );
+  return location;
+}
+
+async function updateLocationProfile(owner, rawLocation, { makeCurrent, saveToSaved }) {
+  await ensureDb();
+  const conn = await mysqlPool.getConnection();
+  try {
+    await conn.beginTransaction();
+    const profile = (await fetchLocationProfile(conn, owner)) || buildDefaultLocationProfile(owner);
+    const location = await ensureLocationRow(conn, rawLocation);
+    profile.currentLocation =
+      makeCurrent || !profile.currentLocation ? location : await ensureLocationRow(conn, profile.currentLocation);
+    profile.recentLocations = mergeLocationUnique(profile.recentLocations, location, 12);
+    if (saveToSaved) {
+      profile.savedLocations = mergeLocationUnique(profile.savedLocations, location, 20);
+    }
+
+    await conn.query(
+      `INSERT INTO location_profiles (id, user_id, guest_id, current_location_id)
+       VALUES (?, ?, ?, ?)
+       ON DUPLICATE KEY UPDATE current_location_id = VALUES(current_location_id), updated_at = CURRENT_TIMESTAMP`,
+      [profile.id, owner.userId || null, owner.userId ? null : owner.guestId, profile.currentLocation.id],
+    );
+
+    // Timestamps step back one second per position so later reads keep the list order.
+    const nowMs = Date.now();
+    await conn.query(`DELETE FROM location_saved WHERE profile_id = ?`, [profile.id]);
+    if (profile.savedLocations.length > 0) {
+      await conn.query(
+        `INSERT INTO location_saved (profile_id, location_id, created_at) VALUES ?`,
+        [profile.savedLocations.map((loc, index) => [profile.id, loc.id, new Date(nowMs - index * 1000)])],
+      );
+    }
+    await conn.query(`DELETE FROM location_recent WHERE profile_id = ?`, [profile.id]);
+    if (profile.recentLocations.length > 0) {
+      await conn.query(
+        `INSERT INTO location_recent (id, profile_id, location_id, seen_at) VALUES ?`,
+        [
+          profile.recentLocations.map((loc, index) => [
+            `lr_${crypto.createHash('sha1').update(`${profile.id}|${loc.id}`).digest('hex').slice(0, 24)}`,
+            profile.id,
+            loc.id,
+            new Date(nowMs - index * 1000),
+          ]),
+        ],
+      );
+    }
+
+    const suggestions = mergeDefaultLocationSuggestions(
+      mergeLocationUnique(await readLocationSuggestions(conn), location, 60),
+    );
+    await conn.query(`DELETE FROM location_suggestions`);
+    await conn.query(
+      `INSERT INTO location_suggestions (id, location_id, rank_score) VALUES ?`,
+      [suggestions.map((loc, index) => [`ls_${loc.id}`.slice(0, 64), loc.id, suggestions.length - index])],
+    );
+
+    await conn.commit();
+    return normalizeLocationProfile(profile);
+  } catch (error) {
+    await conn.rollback();
+    throw error;
+  } finally {
+    conn.release();
+  }
+}
+
 async function readDb() {
   await ensureDb();
 
@@ -3752,38 +4182,8 @@ async function readDb() {
   const recentData = recentRows[0];
   const suggestionData = suggestionRows[0];
 
-  const imagesByProduct = new Map();
-  for (const row of imageData) {
-    const list = imagesByProduct.get(row.product_id) || [];
-    list.push(row.image_url);
-    imagesByProduct.set(row.product_id, list);
-  }
-
-  const items = productData.map(row =>
-    normalizeItem({
-      id: row.id,
-      itemType: row.item_type,
-      name: row.name,
-      model: row.model,
-      capacityAh: row.capacity_ah,
-      technologyOption: row.technology_option,
-      sku: row.sku,
-      category: row.category,
-      unit: row.unit,
-      brand: row.brand,
-      tags: row.tags,
-      description: row.description,
-      images: imagesByProduct.get(row.id) || [],
-      hsnCode: row.hsn_code,
-      location: row.location,
-      qty: parseNumber(row.qty_on_hand, 0),
-      reorderPoint: parseNumber(row.reorder_point, 0),
-      purchasePrice: parseNumber(row.purchase_price, 0),
-      sellingPrice: parseNumber(row.selling_price, 0),
-      taxRate: parseNumber(row.tax_rate, 0),
-      updatedAt: toIso(row.updated_at),
-    }),
-  );
+  const imagesByProduct = groupImagesByProduct(imageData);
+  const items = productData.map(row => mapProductRowToItem(row, imagesByProduct));
 
   const itemById = new Map(items.map(item => [item.id, item]));
 
@@ -4018,7 +4418,8 @@ async function readDb() {
 }
 
 function writeDb(db) {
-  writeQueue = writeQueue.then(async () => {
+  // Recover from a previous failed write so one error does not block every later write.
+  writeQueue = writeQueue.catch(() => {}).then(async () => {
     await ensureDb();
     const normalized = normalizeDb(db);
     const conn = await mysqlPool.getConnection();
@@ -4055,29 +4456,7 @@ function writeDb(db) {
 
       await conn.query('SET FOREIGN_KEY_CHECKS = 1');
 
-      const seenUserIds = new Set();
-      const uniqueUsers = [];
-      for (const u of normalized.users) {
-        if (!u?.id || seenUserIds.has(u.id)) continue;
-        seenUserIds.add(u.id);
-        uniqueUsers.push(u);
-      }
-
-      for (const u of uniqueUsers) {
-        const storedPassword = await ensurePasswordHash(u.password);
-        await conn.query(
-          `INSERT INTO users (id, username, password_hash, role, full_name, phone, is_active)
-           VALUES (?, ?, ?, ?, ?, ?, 1)
-           ON DUPLICATE KEY UPDATE
-             username = VALUES(username),
-             password_hash = VALUES(password_hash),
-             role = VALUES(role),
-             full_name = VALUES(full_name),
-             phone = VALUES(phone),
-             is_active = 1`,
-          [u.id, u.username, storedPassword, u.role, u.name, null],
-        );
-      }
+      // Users are owned by the auth/profile routes and must not be rewritten from this snapshot.
 
       for (const supplier of normalized.suppliers) {
         await conn.query(
@@ -4453,8 +4832,12 @@ function writeDb(db) {
 }
 
 function sendJson(res, status, payload, extraHeaders = null) {
+  if (res.headersSent || res.destroyed) {
+    return;
+  }
   res.writeHead(status, {
     'Content-Type': 'application/json',
+    'X-Content-Type-Options': 'nosniff',
     'Access-Control-Allow-Origin': '*',
     'Access-Control-Allow-Methods': 'GET,POST,PATCH,DELETE,OPTIONS',
     'Access-Control-Allow-Headers': 'Content-Type,Authorization',
@@ -4468,6 +4851,8 @@ function sendHtml(res, status, html, extraHeaders = null) {
     'Content-Type': 'text/html; charset=utf-8',
     'Cache-Control': 'no-store, max-age=0',
     'X-Content-Type-Options': 'nosniff',
+    'X-Frame-Options': 'DENY',
+    'Referrer-Policy': 'no-referrer',
     ...(extraHeaders || {}),
   });
   res.end(String(html || ''));
@@ -4492,12 +4877,29 @@ function sendError(res, status, message) {
   sendJson(res, status, { error: message });
 }
 
-async function parseJsonBody(req) {
+async function readRequestBody(req) {
+  if (Buffer.isBuffer(req.bufferedBody)) {
+    return req.bufferedBody;
+  }
+  const declaredLength = Number(req.headers['content-length'] || 0);
+  if (declaredLength > MAX_JSON_BODY_BYTES) {
+    throw createHttpError(413, 'Request body is too large');
+  }
   const chunks = [];
+  let totalBytes = 0;
   for await (const chunk of req) {
+    totalBytes += chunk.length;
+    if (totalBytes > MAX_JSON_BODY_BYTES) {
+      throw createHttpError(413, 'Request body is too large');
+    }
     chunks.push(chunk);
   }
-  const raw = Buffer.concat(chunks).toString('utf8');
+  req.bufferedBody = Buffer.concat(chunks);
+  return req.bufferedBody;
+}
+
+async function parseJsonBody(req) {
+  const raw = (await readRequestBody(req)).toString('utf8');
   if (!raw) {
     return {};
   }
@@ -4662,37 +5064,16 @@ async function getLocationOwner(req, searchParams) {
   if (auth?.userId) {
     return { userId: auth.userId, guestId: null };
   }
-  const guestId = String(searchParams.get('guestId') || '').trim();
+  const guestId = normalizeGuestId(searchParams.get('guestId'));
   if (guestId) {
     return { userId: null, guestId };
   }
   return null;
 }
 
-function findOrCreateLocationProfile(db, owner) {
-  const idx = db.locationProfiles.findIndex(profile =>
-    owner.userId ? profile.userId === owner.userId : profile.guestId === owner.guestId,
-  );
-  if (idx >= 0) {
-    return { profile: db.locationProfiles[idx], idx };
-  }
-  const profile = normalizeLocationProfile({
-    id: `lp_${crypto.randomUUID().slice(0, 8)}`,
-    userId: owner.userId || null,
-    guestId: owner.guestId || null,
-    currentLocation: {
-      city: 'New Delhi',
-      state: 'Delhi',
-      country: 'India',
-      pincode: '110001',
-      label: 'New Delhi, India',
-      source: 'default',
-    },
-    savedLocations: [],
-    recentLocations: [],
-  });
-  db.locationProfiles.unshift(profile);
-  return { profile, idx: 0 };
+function normalizeGuestId(value) {
+  const guestId = String(value || '').trim();
+  return GUEST_ID_PATTERN.test(guestId) ? guestId : '';
 }
 
 function mergeLocationUnique(list, location, max = 10) {
@@ -4884,7 +5265,7 @@ async function getStorefrontOwner(req, searchParams, body = null) {
   if (auth?.userId) {
     return { userId: auth.userId, guestId: null };
   }
-  const guestId = String(searchParams.get('guestId') || body?.guestId || '').trim();
+  const guestId = normalizeGuestId(searchParams.get('guestId') || body?.guestId);
   if (!guestId) {
     return null;
   }
@@ -4896,6 +5277,13 @@ function buildOwnerCondition(owner) {
     return { sql: 'user_id = ? AND guest_id IS NULL', params: [owner.userId] };
   }
   return { sql: 'user_id IS NULL AND guest_id = ?', params: [owner.guestId] };
+}
+
+// Must match getDetailPrice().base in src/app/utils/publicCatalog.ts.
+function getStorefrontUnitPrice(row) {
+  const purchasePrice = Math.max(0, parseNumber(row?.purchase_price, 0));
+  const sellingPrice = Math.max(0, parseNumber(row?.selling_price, 0));
+  return Math.round(sellingPrice > 0 ? sellingPrice : purchasePrice);
 }
 
 function getFallbackThumbnail() {
@@ -5477,12 +5865,41 @@ async function createEntityRoutes({ pathname, req, res, db, collection, typeName
   return false;
 }
 
-const server = http.createServer(async (req, res) => {
-  const parsedUrl = new URL(req.url || '/', `http://${req.headers.host}`);
-  const rawPathname = parsedUrl.pathname;
-  const pathname = rawPathname.startsWith('/api/public/store/')
+function toRoutePathname(rawPathname) {
+  return rawPathname.startsWith('/api/public/store/')
     ? rawPathname.replace('/api/public/store/', '/api/public/')
     : rawPathname;
+}
+
+const SNAPSHOT_MUTATION_ROUTE =
+  /^\/api\/(items|inventory|suppliers|customers|stock-adjustments|purchase-orders|sales-orders|bills|invoices)(\/|$)/;
+const EXCLUSIVE_MUTATION_ROUTES = new Set([
+  '/api/auth/register',
+  '/api/auth/delete-account',
+  '/api/public/storefront/checkout',
+  '/api/public/location-profile/select',
+  '/api/public/location-profile/save',
+]);
+
+// writeDb replaces whole tables from a snapshot, so every request that reads a snapshot and writes
+// it back, or writes rows into those tables directly, must run one at a time.
+function requiresExclusiveDbAccess(method, pathname) {
+  if (method === 'GET' || method === 'HEAD' || method === 'OPTIONS') {
+    return false;
+  }
+  return SNAPSHOT_MUTATION_ROUTE.test(pathname) || EXCLUSIVE_MUTATION_ROUTES.has(pathname);
+}
+
+function runExclusiveDbMutation(task) {
+  const run = dbMutationChain.then(task, task);
+  dbMutationChain = run.catch(() => {});
+  return run;
+}
+
+async function handleRequest(req, res) {
+  const parsedUrl = new URL(req.url || '/', 'http://localhost');
+  const rawPathname = parsedUrl.pathname;
+  const pathname = toRoutePathname(rawPathname);
   const { searchParams } = parsedUrl;
 
   if (req.method === 'OPTIONS') {
@@ -5536,10 +5953,20 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
+    if (pathname === '/privacy-policy' && req.method === 'GET') {
+      sendHtml(res, 200, renderPrivacyPolicyPage(), { 'Cache-Control': 'public, max-age=3600' });
+      return;
+    }
+
+    if (pathname === '/account-deletion' && req.method === 'GET') {
+      sendHtml(res, 200, renderAccountDeletionPage(), { 'Cache-Control': 'public, max-age=3600' });
+      return;
+    }
+
     if (pathname === '/api/public/stock' && req.method === 'GET') {
-      const db = await readDb();
+      const catalogItems = await readCatalogItems();
       const search = (searchParams.get('search') || '').trim().toLowerCase();
-      const items = db.items
+      const items = catalogItems
         .filter(item => {
           const text = `${item.name} ${item.sku} ${item.category}`.toLowerCase();
           return !search || text.includes(search);
@@ -5604,9 +6031,9 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (pathname === '/api/public/products' && req.method === 'GET') {
-      const db = await readDb();
+      const catalogItems = await readCatalogItems();
       const search = (searchParams.get('search') || '').trim().toLowerCase();
-      const products = db.items
+      const products = catalogItems
         .filter(item => {
           const text = `${item.name} ${item.model || ''} ${item.brand || ''} ${item.category} ${item.technologyOption || ''}`.toLowerCase();
           return !search || text.includes(search);
@@ -5639,8 +6066,8 @@ const server = http.createServer(async (req, res) => {
 
     const publicProductId = getIdFromPath(pathname, '/api/public/products');
     if (publicProductId && req.method === 'GET') {
-      const db = await readDb();
-      const item = db.items.find(p => p.id === publicProductId);
+      const catalogItems = await readCatalogItems();
+      const item = catalogItems.find(p => p.id === publicProductId);
       if (!item) {
         sendError(res, 404, 'Product not found');
         return;
@@ -5648,7 +6075,7 @@ const server = http.createServer(async (req, res) => {
       const baseKey = `${item.name}|${item.model || item.sku}|${item.brand || ''}|${item.category}|${item.technologyOption || ''}`.toLowerCase();
       const availableCapacities = Array.from(
         new Set(
-          db.items
+          catalogItems
             .filter(
               p =>
                 `${p.name}|${p.model || p.sku}|${p.brand || ''}|${p.category}|${p.technologyOption || ''}`.toLowerCase() ===
@@ -5700,6 +6127,7 @@ const server = http.createServer(async (req, res) => {
         return;
       }
 
+      enforceLoginThrottle(req, username);
       await ensureDb();
       const [rows] = await mysqlPool.query(
         `SELECT id, username, password_hash, role, full_name
@@ -5713,9 +6141,11 @@ const server = http.createServer(async (req, res) => {
       const storedPassword = String(row?.password_hash || '').trim();
       const isPasswordValid = row ? await verifyPassword(password, storedPassword) : false;
       if (!row || !isPasswordValid) {
+        recordLoginFailure(req, username);
         sendError(res, 401, 'Invalid username or password');
         return;
       }
+      clearLoginFailures(req, username);
 
       if (row && storedPassword && !isPasswordHash(storedPassword)) {
         await mysqlPool.query(
@@ -5970,10 +6400,120 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
+    if (pathname === '/api/auth/change-password' && req.method === 'POST') {
+      const auth = await requireAuth(req, res, ['admin', 'manager', 'staff', 'customer']);
+      if (!auth) {
+        return;
+      }
+      const body = await parseJsonBody(req);
+      const currentPassword = String(body.currentPassword || '').trim();
+      const newPassword = String(body.newPassword || '').trim();
+      if (!currentPassword || !newPassword) {
+        sendError(res, 400, 'Current and new password are required');
+        return;
+      }
+      if (newPassword.length < 6) {
+        sendError(res, 400, 'New password must be at least 6 characters');
+        return;
+      }
+      if (newPassword === currentPassword) {
+        sendError(res, 400, 'New password must be different from the current password');
+        return;
+      }
+      enforceLoginThrottle(req, auth.username);
+      const [rows] = await mysqlPool.query(
+        `SELECT password_hash FROM users WHERE id = ? AND is_active = 1 LIMIT 1`,
+        [auth.userId],
+      );
+      const row = Array.isArray(rows) ? rows[0] : null;
+      if (!row || !(await verifyPassword(currentPassword, String(row.password_hash || '').trim()))) {
+        recordLoginFailure(req, auth.username);
+        sendError(res, 400, 'Current password is incorrect');
+        return;
+      }
+      clearLoginFailures(req, auth.username);
+      await mysqlPool.query(`UPDATE users SET password_hash = ? WHERE id = ?`, [
+        await hashPassword(newPassword),
+        auth.userId,
+      ]);
+      await revokeUserSessions(auth.userId);
+      const token = await createSession({
+        id: auth.userId,
+        role: auth.role,
+        name: auth.name,
+        username: auth.username,
+      });
+      sendJson(res, 200, { success: true, token });
+      return;
+    }
+
+    if (pathname === '/api/auth/delete-account' && req.method === 'POST') {
+      const auth = await requireAuth(req, res, ['admin', 'manager', 'staff', 'customer']);
+      if (!auth) {
+        return;
+      }
+      if (auth.role !== 'customer') {
+        sendError(res, 403, 'Staff accounts must be removed by the business owner');
+        return;
+      }
+      const body = await parseJsonBody(req);
+      const password = String(body.password || '').trim();
+      enforceLoginThrottle(req, auth.username);
+      const [rows] = await mysqlPool.query(
+        `SELECT password_hash FROM users WHERE id = ? AND is_active = 1 LIMIT 1`,
+        [auth.userId],
+      );
+      const row = Array.isArray(rows) ? rows[0] : null;
+      if (!row || !password || !(await verifyPassword(password, String(row.password_hash || '').trim()))) {
+        recordLoginFailure(req, auth.username);
+        sendError(res, 400, 'Password is incorrect');
+        return;
+      }
+      clearLoginFailures(req, auth.username);
+
+      // Orders, invoices and warranty records stay for tax/warranty obligations; only the login and personal data go.
+      const conn = await mysqlPool.getConnection();
+      try {
+        await conn.beginTransaction();
+        await conn.query(
+          `UPDATE users
+           SET username = ?, full_name = 'Deleted User', phone = NULL, password_hash = ?, is_active = 0
+           WHERE id = ?`,
+          [`deleted_${auth.userId}`, await hashPassword(crypto.randomBytes(24).toString('hex')), auth.userId],
+        );
+        for (const table of [
+          'user_preferences',
+          'user_dark_mode_settings',
+          'notification_preferences',
+          'wishlists',
+          'payment_methods',
+          'location_profiles',
+          'password_reset_tokens',
+          'carts',
+        ]) {
+          await conn.query(`DELETE FROM ${table} WHERE user_id = ?`, [auth.userId]);
+        }
+        await conn.commit();
+      } catch (error) {
+        try {
+          await conn.rollback();
+        } catch {
+          // ignore rollback errors
+        }
+        throw error;
+      } finally {
+        conn.release();
+      }
+      await revokeUserSessions(auth.userId);
+      sendJson(res, 200, { success: true });
+      return;
+    }
+
     if (pathname === '/api/public/location-suggestions' && req.method === 'GET') {
-      const db = await readDb();
+      await ensureDb();
+      const locationSuggestions = await readLocationSuggestions();
       const q = String(searchParams.get('query') || '').trim().toLowerCase();
-      const suggestions = db.locationSuggestions.filter(loc => {
+      const suggestions = locationSuggestions.filter(loc => {
         if (!q) return true;
         const pincode = String(loc.pincode || '').toLowerCase();
         const text = `${loc.label} ${loc.area || ''} ${loc.city} ${loc.state} ${loc.country} ${loc.pincode}`.toLowerCase();
@@ -5993,8 +6533,8 @@ const server = http.createServer(async (req, res) => {
         sendError(res, 400, 'guestId is required for anonymous users');
         return;
       }
-      const db = await readDb();
-      const { profile } = findOrCreateLocationProfile(db, owner);
+      await ensureDb();
+      const profile = (await fetchLocationProfile(mysqlPool, owner)) || buildDefaultLocationProfile(owner);
       sendJson(res, 200, { profile });
       return;
     }
@@ -6003,7 +6543,7 @@ const server = http.createServer(async (req, res) => {
       const body = await parseJsonBody(req);
       const owner = (await getLocationOwner(req, searchParams)) || {
         userId: null,
-        guestId: String(body.guestId || '').trim(),
+        guestId: normalizeGuestId(body.guestId),
       };
       if (!owner.userId && !owner.guestId) {
         sendError(res, 400, 'guestId is required for anonymous users');
@@ -6014,19 +6554,11 @@ const server = http.createServer(async (req, res) => {
         sendError(res, 400, 'location label is required');
         return;
       }
-      const db = await readDb();
-      const { profile, idx } = findOrCreateLocationProfile(db, owner);
-      const shouldSave = Boolean(body.saveToSaved);
-      profile.currentLocation = location;
-      profile.recentLocations = mergeLocationUnique(profile.recentLocations, location, 12);
-      if (shouldSave) {
-        profile.savedLocations = mergeLocationUnique(profile.savedLocations, location, 20);
-      }
-      profile.updatedAt = new Date().toISOString();
-      db.locationProfiles[idx] = normalizeLocationProfile(profile);
-      db.locationSuggestions = mergeLocationUnique(db.locationSuggestions, location, 60);
-      await writeDb(db);
-      sendJson(res, 200, { profile: db.locationProfiles[idx] });
+      const profile = await updateLocationProfile(owner, location, {
+        makeCurrent: true,
+        saveToSaved: Boolean(body.saveToSaved),
+      });
+      sendJson(res, 200, { profile });
       return;
     }
 
@@ -6034,25 +6566,15 @@ const server = http.createServer(async (req, res) => {
       const body = await parseJsonBody(req);
       const owner = (await getLocationOwner(req, searchParams)) || {
         userId: null,
-        guestId: String(body.guestId || '').trim(),
+        guestId: normalizeGuestId(body.guestId),
       };
       if (!owner.userId && !owner.guestId) {
         sendError(res, 400, 'guestId is required for anonymous users');
         return;
       }
       const location = normalizeLocation(body.location || {});
-      const db = await readDb();
-      const { profile, idx } = findOrCreateLocationProfile(db, owner);
-      profile.savedLocations = mergeLocationUnique(profile.savedLocations, location, 20);
-      profile.recentLocations = mergeLocationUnique(profile.recentLocations, location, 12);
-      if (!profile.currentLocation) {
-        profile.currentLocation = location;
-      }
-      profile.updatedAt = new Date().toISOString();
-      db.locationProfiles[idx] = normalizeLocationProfile(profile);
-      db.locationSuggestions = mergeLocationUnique(db.locationSuggestions, location, 60);
-      await writeDb(db);
-      sendJson(res, 200, { profile: db.locationProfiles[idx] });
+      const profile = await updateLocationProfile(owner, location, { makeCurrent: false, saveToSaved: true });
+      sendJson(res, 200, { profile });
       return;
     }
 
@@ -6114,7 +6636,7 @@ const server = http.createServer(async (req, res) => {
         return;
       }
 
-      const items = Array.isArray(body.items) ? body.items : [];
+      const items = (Array.isArray(body.items) ? body.items : []).slice(0, 100);
       const conn = await mysqlPool.getConnection();
       try {
         await conn.beginTransaction();
@@ -6122,18 +6644,46 @@ const server = http.createServer(async (req, res) => {
 
         await conn.query(`DELETE FROM cart_items WHERE cart_id = ?`, [cart.id]);
 
+        const requestedLines = new Map();
         for (const raw of items) {
           const productId = String(raw?.productId || '').trim();
           if (!productId) continue;
-          const capacity = normalizeCapacityAh(raw?.capacity || raw?.capacityAh);
-          const qty = parseNumber(raw?.qty, 0);
-          const unitPrice = parseNumber(raw?.unitPrice, 0);
-          if (qty <= 0 || unitPrice < 0) continue;
+          const capacity = String(normalizeCapacityAh(raw?.capacity || raw?.capacityAh) || '');
+          const qty = Math.min(999, Math.floor(parseNumber(raw?.qty, 0)));
+          if (qty <= 0) continue;
+          const key = `${productId}|${capacity.toLowerCase()}`;
+          const existing = requestedLines.get(key);
+          requestedLines.set(key, { productId, capacity, qty: Math.min(999, (existing?.qty || 0) + qty) });
+        }
+
+        const productIds = Array.from(new Set(Array.from(requestedLines.values()).map(line => line.productId)));
+        const priceByProductId = new Map();
+        if (productIds.length > 0) {
+          const [priceRows] = await conn.query(
+            `SELECT id, purchase_price, selling_price
+             FROM products
+             WHERE id IN (?)`,
+            [productIds],
+          );
+          for (const row of Array.isArray(priceRows) ? priceRows : []) {
+            priceByProductId.set(row.id, getStorefrontUnitPrice(row));
+          }
+        }
+
+        for (const line of requestedLines.values()) {
+          if (!priceByProductId.has(line.productId)) continue;
           await conn.query(
             `INSERT INTO cart_items
               (id, cart_id, product_id, capacity, unit_price, qty)
              VALUES (?, ?, ?, ?, ?, ?)`,
-            [`ci_${crypto.randomUUID().slice(0, 8)}`, cart.id, productId, capacity, unitPrice, qty],
+            [
+              `ci_${crypto.randomUUID().slice(0, 8)}`,
+              cart.id,
+              line.productId,
+              line.capacity,
+              priceByProductId.get(line.productId),
+              line.qty,
+            ],
           );
         }
 
@@ -6181,6 +6731,8 @@ const server = http.createServer(async (req, res) => {
                   COALESCE(p.unit, 'pcs') AS unit,
                   COALESCE(p.hsn_code, '') AS hsn_code,
                   COALESCE(p.tax_rate, 0) AS tax_rate,
+                  p.purchase_price,
+                  p.selling_price,
                   p.qty_on_hand
            FROM cart_items ci
            LEFT JOIN products p ON p.id = ci.product_id
@@ -6192,6 +6744,9 @@ const server = http.createServer(async (req, res) => {
           sendError(res, 400, 'Cart is empty');
           await conn.rollback();
           return;
+        }
+        for (const row of lines) {
+          row.unit_price = getStorefrontUnitPrice(row);
         }
 
         for (const row of lines) {
@@ -6291,6 +6846,7 @@ const server = http.createServer(async (req, res) => {
         );
 
         const invoiceLineDrafts = [];
+        const balanceByProductId = new Map();
         for (const row of lines) {
           const unitPrice = parseNumber(row.unit_price, 0);
           const qty = parseNumber(row.qty, 0);
@@ -6334,12 +6890,23 @@ const server = http.createServer(async (req, res) => {
             unitPrice,
             taxRate: parseNumber(row.tax_rate, 0),
           });
-          await conn.query(
+          const [stockUpdate] = await conn.query(
             `UPDATE products
              SET qty_on_hand = qty_on_hand - ?
-             WHERE id = ?`,
-            [qty, row.product_id],
+             WHERE id = ?
+               AND qty_on_hand >= ?`,
+            [qty, row.product_id, qty],
           );
+          if (!stockUpdate || stockUpdate.affectedRows !== 1) {
+            await conn.rollback();
+            sendError(res, 400, `Insufficient stock for ${productName}`);
+            return;
+          }
+          const balanceAfter =
+            (balanceByProductId.has(row.product_id)
+              ? balanceByProductId.get(row.product_id)
+              : parseNumber(row.qty_on_hand, 0)) - qty;
+          balanceByProductId.set(row.product_id, balanceAfter);
           await conn.query(
             `INSERT INTO stock_movements
               (id, product_id, movement_type, delta_qty, balance_after, reason, reference_no, created_by)
@@ -6348,7 +6915,7 @@ const server = http.createServer(async (req, res) => {
               `mov_${crypto.randomUUID().slice(0, 8)}`,
               row.product_id,
               -qty,
-              parseNumber(row.qty_on_hand, 0) - qty,
+              balanceAfter,
               'Storefront checkout',
               orderNumber,
             ],
@@ -7290,6 +7857,7 @@ const server = http.createServer(async (req, res) => {
       }
       const patch = { ...body };
       delete patch.uploadedImages;
+      delete patch.id;
       if (Array.isArray(body.images) || uploadedImageUrls.length > 0) {
         const ownStaticPrefix = `${getRequestBaseUrl(req)}/static/`;
         const keptImages = (Array.isArray(body.images) ? body.images : [])
@@ -7887,8 +8455,67 @@ const server = http.createServer(async (req, res) => {
     }
     sendError(res, mapped.status, mapped.message);
   }
+}
+
+async function dispatchRequest(req, res) {
+  let pathname = '/';
+  try {
+    pathname = toRoutePathname(new URL(req.url || '/', 'http://localhost').pathname);
+  } catch {
+    sendError(res, 400, 'Invalid request URL');
+    return;
+  }
+  if (!requiresExclusiveDbAccess(req.method, pathname)) {
+    await handleRequest(req, res);
+    return;
+  }
+  try {
+    // Read the body before queueing so a slow upload cannot hold up other writes.
+    await readRequestBody(req);
+  } catch (error) {
+    const mapped = toErrorResponse(error);
+    sendError(res, mapped.status, mapped.message);
+    return;
+  }
+  await runExclusiveDbMutation(() => handleRequest(req, res));
+}
+
+const server = http.createServer((req, res) => {
+  dispatchRequest(req, res).catch(error => {
+    console.error(`[${new Date().toISOString()}] Unhandled ${req.method} ${req.url}`, error);
+    sendError(res, 500, 'Server error. Please try again.');
+  });
 });
+
+async function warnAboutDefaultCredentials() {
+  try {
+    await ensureDb();
+    const [rows] = await mysqlPool.query(
+      `SELECT id, username, password_hash
+       FROM users
+       WHERE id IN (?)
+         AND is_active = 1`,
+      [DEFAULT_USERS.map(u => u.id)],
+    );
+    const exposed = [];
+    for (const row of Array.isArray(rows) ? rows : []) {
+      const seed = DEFAULT_USERS.find(u => u.id === row.id);
+      if (seed && (await verifyPassword(seed.password, row.password_hash))) {
+        exposed.push(row.username);
+      }
+    }
+    if (exposed.length > 0) {
+      console.warn(
+        `[SECURITY] Default demo passwords are still active for: ${exposed.join(', ')}. ` +
+          'Change them from the app (Profile > Change Password) or deactivate these accounts.',
+      );
+    }
+  } catch (error) {
+    console.warn('[SECURITY] Could not verify default credentials:', error?.message || error);
+  }
+}
 
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`Inventory API running on 0.0.0.0:${PORT}`);
+  void warnAboutDefaultCredentials();
 });

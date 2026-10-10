@@ -118,10 +118,23 @@ const config = {
     maxItemUploadCount: parseNumber(process.env.MAX_ITEM_UPLOAD_COUNT, 5),
     maxItemUploadBytes: parseNumber(process.env.MAX_ITEM_UPLOAD_BYTES, 5 * 1024 * 1024),
   },
+  // Base64 item images are sent inside JSON, so the default allows every upload slot plus headroom.
+  maxJsonBodyBytes: parseNumber(
+    process.env.MAX_JSON_BODY_BYTES,
+    Math.ceil(
+      (parseNumber(process.env.MAX_ITEM_UPLOAD_COUNT, 5) * parseNumber(process.env.MAX_ITEM_UPLOAD_BYTES, 5 * 1024 * 1024) * 4) / 3,
+    ) + 1024 * 1024,
+  ),
   auth: {
     publicBaseUrl: String(process.env.AUTH_PUBLIC_BASE_URL || process.env.APP_PUBLIC_URL || '').trim(),
     resetTokenTtlMs: parseNumber(process.env.AUTH_RESET_TOKEN_TTL_MS, 15 * 60 * 1000),
     resetRequestCooldownMs: parseNumber(process.env.AUTH_RESET_REQUEST_COOLDOWN_MS, 60 * 1000),
+    invoiceDownloadSecret: String(process.env.INVOICE_DOWNLOAD_SECRET || '').trim(),
+    initialAdminPassword: String(process.env.ADMIN_INITIAL_PASSWORD || '').trim(),
+  },
+  support: {
+    email: String(process.env.SUPPORT_EMAIL || '').trim(),
+    phone: String(process.env.SUPPORT_PHONE || '').trim(),
   },
   mail: {
     host: String(process.env.SMTP_HOST || '').trim(),

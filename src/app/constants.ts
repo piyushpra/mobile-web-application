@@ -37,7 +37,10 @@ export const API_BASE = Platform.select({
   ios: PUBLIC_API_ORIGIN,
   default: PUBLIC_API_ORIGIN,
 });
-export const APP_CURRENT_VERSION = '1.0.2';
+export const PRIVACY_POLICY_URL = `${PUBLIC_API_ORIGIN}/privacy-policy`;
+export const SUPPORT_EMAIL = 'support@fuelectric.com';
+export const SUPPORT_PHONE = '+919876543210';
+export const APP_CURRENT_VERSION = '1.0.3';
 export const APP_UPDATE_APP_ID = 'com.mobile';
 export const APP_UPDATE_CHANNEL = 'production';
 export const ITEM_CATEGORY_OPTIONS = ['Battery', 'Inverter', 'Miscellaneous'];
