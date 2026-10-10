@@ -3124,7 +3124,6 @@ function MainApp() {
           return;
         }
         if (enableResult === 'denied') {
-          showEnableLocationAlert();
           setError('Location is off. Turn it on or search your city/pincode.');
           return;
         }

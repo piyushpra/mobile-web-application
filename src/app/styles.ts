@@ -510,6 +510,9 @@ const styles = StyleSheet.create({
   },
   stickySearchOuter: {
     zIndex: 3,
+    // ScrollView moves this style onto its sticky-header wrapper, which overlaps the location card
+    // above via a negative top margin; box-none lets taps in that overlap reach the card.
+    pointerEvents: 'box-none',
   },
   stickySearchBackdrop: {
     position: 'absolute',
