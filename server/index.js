@@ -3955,6 +3955,28 @@ async function updateLocationProfile(owner, rawLocation, { makeCurrent, saveToSa
   }
 }
 
+async function removeLocationFromProfile(owner, locationId) {
+  await ensureDb();
+  const conn = await mysqlPool.getConnection();
+  try {
+    await conn.beginTransaction();
+    const profile = await fetchLocationProfile(conn, owner);
+    if (!profile) {
+      await conn.commit();
+      return buildDefaultLocationProfile(owner);
+    }
+    await conn.query(`DELETE FROM location_saved WHERE profile_id = ? AND location_id = ?`, [profile.id, locationId]);
+    await conn.query(`DELETE FROM location_recent WHERE profile_id = ? AND location_id = ?`, [profile.id, locationId]);
+    await conn.commit();
+    return (await fetchLocationProfile(conn, owner)) || buildDefaultLocationProfile(owner);
+  } catch (error) {
+    await conn.rollback();
+    throw error;
+  } finally {
+    conn.release();
+  }
+}
+
 async function readDb() {
   await ensureDb();
 
@@ -5879,6 +5901,7 @@ const EXCLUSIVE_MUTATION_ROUTES = new Set([
   '/api/public/storefront/checkout',
   '/api/public/location-profile/select',
   '/api/public/location-profile/save',
+  '/api/public/location-profile/remove',
 ]);
 
 // writeDb replaces whole tables from a snapshot, so every request that reads a snapshot and writes
@@ -6574,6 +6597,26 @@ async function handleRequest(req, res) {
       }
       const location = normalizeLocation(body.location || {});
       const profile = await updateLocationProfile(owner, location, { makeCurrent: false, saveToSaved: true });
+      sendJson(res, 200, { profile });
+      return;
+    }
+
+    if (pathname === '/api/public/location-profile/remove' && req.method === 'POST') {
+      const body = await parseJsonBody(req);
+      const owner = (await getLocationOwner(req, searchParams)) || {
+        userId: null,
+        guestId: normalizeGuestId(body.guestId),
+      };
+      if (!owner.userId && !owner.guestId) {
+        sendError(res, 400, 'guestId is required for anonymous users');
+        return;
+      }
+      const locationId = String(body.locationId || '').trim();
+      if (!/^[A-Za-z0-9_.:-]{1,64}$/.test(locationId)) {
+        sendError(res, 400, 'valid locationId is required');
+        return;
+      }
+      const profile = await removeLocationFromProfile(owner, locationId);
       sendJson(res, 200, { profile });
       return;
     }

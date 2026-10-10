@@ -59,6 +59,8 @@ import {
 } from './appUpdateInstaller';
 import { downloadDocumentToDevice, isDocumentDownloaderAvailable } from './documentDownloader';
 import { getDeviceCurrentPosition, hasNativeDeviceLocation, requestEnableDeviceLocation } from './deviceLocation';
+import { NOMINATIM_HEADERS, reverseGeocode } from './geocoding';
+import MapLocationPicker from './components/MapLocationPicker';
 import styles from './styles';
 import type {
   AdminApiHealthStatus,
@@ -936,6 +938,8 @@ function MainApp() {
   const [recentLocations, setRecentLocations] = useState<DeliveryLocation[]>([]);
   const [searchedLocations, setSearchedLocations] = useState<DeliveryLocation[]>([]);
   const [draftDeliveryLocation, setDraftDeliveryLocation] = useState<DeliveryLocation | null>(null);
+  const [mapPickerCenter, setMapPickerCenter] = useState<{ lat: number; lng: number } | null>(null);
+  const [isMapPickerVisible, setIsMapPickerVisible] = useState(false);
   const [showMoreSuggestedLocations, setShowMoreSuggestedLocations] = useState(false);
   const [selectedCapacity, setSelectedCapacity] = useState('150Ah');
   const [cartItems, setCartItems] = useState<CartItem[]>([]);
@@ -2893,6 +2897,64 @@ function MainApp() {
     if (json.profile.currentLocation) {
       setCurrentDeliveryLocation(json.profile.currentLocation);
     }
+    return json.profile;
+  };
+
+  const removeLocationFromBook = async (location: DeliveryLocation) => {
+    const q = `?guestId=${encodeURIComponent(guestIdRef.current)}`;
+    const payload = { locationId: location.id, guestId: guestIdRef.current };
+    const json = await locationApiRequest<{ profile: { currentLocation: DeliveryLocation | null; savedLocations: DeliveryLocation[]; recentLocations: DeliveryLocation[] } }>(
+      `/api/public/location-profile/remove${q}`,
+      {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      },
+    );
+    setSavedLocations(json.profile.savedLocations || []);
+    setRecentLocations(json.profile.recentLocations || []);
+    setDraftDeliveryLocation(prev => (prev?.id === location.id ? null : prev));
+  };
+
+  const confirmRemoveLocation = (location: DeliveryLocation) => {
+    Alert.alert('Remove Location', `Remove "${location.label}" from your locations?`, [
+      { text: 'Cancel', style: 'cancel' },
+      {
+        text: 'Remove',
+        style: 'destructive',
+        onPress: async () => {
+          try {
+            await removeLocationFromBook(location);
+            showToast('Location removed');
+          } catch (err) {
+            setError(err instanceof Error ? err.message : 'Failed to remove location');
+          }
+        },
+      },
+    ]);
+  };
+
+  const openMapPicker = () => {
+    const source = draftDeliveryLocation ?? currentDeliveryLocation;
+    const lat = Number(source?.lat);
+    const lng = Number(source?.lng);
+    setMapPickerCenter(
+      source?.lat != null && source?.lng != null && Number.isFinite(lat) && Number.isFinite(lng) ? { lat, lng } : null,
+    );
+    setIsMapPickerVisible(true);
+  };
+
+  const handleMapLocationSave = async (location: DeliveryLocation, deliverHere: boolean) => {
+    if (deliverHere) {
+      await selectDeliveryLocation(location, true);
+      setIsMapPickerVisible(false);
+      setIsLocationModalVisible(false);
+      showToast(`Delivering to ${location.label}`);
+    } else {
+      const profile = await saveLocationToBook(location);
+      setDraftDeliveryLocation(profile.savedLocations?.[0] ?? location);
+      setIsMapPickerVisible(false);
+      showToast('Location saved');
+    }
   };
 
   const loadSearchedLocations = async (queryText: string) => {
@@ -3039,11 +3101,7 @@ function MainApp() {
           try {
             const nomRes = await fetchWithTimeout(
               `https://nominatim.openstreetmap.org/search?format=jsonv2&addressdetails=1&limit=5&q=${encodeURIComponent(q)}`,
-              {
-                headers: {
-                  Accept: 'application/json',
-                },
-              },
+              { headers: NOMINATIM_HEADERS },
               EXTERNAL_LOOKUP_TIMEOUT_MS,
             );
             const nomJson = await parseResponseSafe(nomRes);
@@ -3129,17 +3187,24 @@ function MainApp() {
         }
       }
 
-      const position = useNativeLocation
-        ? { coords: await getDeviceCurrentPosition(12000) }
-        : await new Promise<any>((resolve, reject) => {
-            nav.geolocation.getCurrentPosition(resolve, reject, {
-              enableHighAccuracy: true,
-              timeout: 12000,
-              maximumAge: 10000,
-            });
+      let coords: { latitude?: unknown; longitude?: unknown } | null = null;
+      if (useNativeLocation) {
+        coords = await getDeviceCurrentPosition(12000);
+      } else {
+        const webPosition = await new Promise<any>((resolve, reject) => {
+          nav.geolocation.getCurrentPosition(resolve, reject, {
+            enableHighAccuracy: true,
+            timeout: 12000,
+            maximumAge: 10000,
           });
-      const lat = Number(position?.coords?.latitude);
-      const lng = Number(position?.coords?.longitude);
+        });
+        coords = webPosition?.coords ?? null;
+      }
+      const lat = Number(coords?.latitude);
+      const lng = Number(coords?.longitude);
+      if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+        throw new Error('Location unavailable. Try again or search your city/pincode.');
+      }
 
       let city = '';
       let state = '';
@@ -3148,17 +3213,11 @@ function MainApp() {
       let label = `Lat ${lat.toFixed(4)}, Lng ${lng.toFixed(4)}`;
 
       try {
-        const r = await fetchWithTimeout(
-          `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${encodeURIComponent(String(lat))}&lon=${encodeURIComponent(String(lng))}`,
-          undefined,
-          EXTERNAL_LOOKUP_TIMEOUT_MS,
-        );
-        const j = await r.json();
-        const addr = j?.address || {};
-        city = String(addr.city || addr.town || addr.village || addr.county || '').trim();
-        state = String(addr.state || '').trim();
-        country = String(addr.country || country).trim();
-        pincode = String(addr.postcode || '').trim();
+        const addr = await reverseGeocode(lat, lng);
+        city = addr.city;
+        state = addr.state;
+        country = addr.country || country;
+        pincode = addr.pincode;
         label = [city || state || 'Current Location', country].filter(Boolean).join(', ');
       } catch {
         // reverse geocoding failed, fallback to lat/lng label
@@ -4694,6 +4753,7 @@ function MainApp() {
     () => filteredLocationSuggestions.slice(0, showMoreSuggestedLocations ? 5 : 3),
     [filteredLocationSuggestions, showMoreSuggestedLocations],
   );
+  const recentLocationIds = useMemo(() => new Set(recentLocations.map(loc => loc.id)), [recentLocations]);
   const canShowMoreSuggestedLocations = filteredLocationSuggestions.length > 3;
   const suggestedEmptyMessage = useMemo(() => {
     const q = locationSearch.trim();
@@ -7589,6 +7649,9 @@ function MainApp() {
                   <Text style={styles.detectBtnText}>{isDetectingLocation ? 'Detecting...' : 'Use Current Location'}</Text>
                 </View>
               </Pressable>
+              <Pressable style={styles.mapPickBtn} onPress={openMapPicker}>
+                <Text style={styles.mapPickBtnText}>Pick Location on Map</Text>
+              </Pressable>
             </View>
 
             <ScrollView
@@ -7612,10 +7675,23 @@ function MainApp() {
                     ]}
                     onPress={() => setDraftDeliveryLocation(loc)}
                   >
-                    <Text style={[styles.locationRowTitle, { color: theme.text }]}>{loc.label}</Text>
-                    <Text style={[styles.locationRowSub, { color: theme.subtext }]}>
-                      {[loc.area, loc.city, loc.state, loc.pincode].filter(Boolean).join(' - ')}
-                    </Text>
+                    <View style={styles.locationRowCardInner}>
+                      <View style={styles.locationRowTextWrap}>
+                        <Text style={[styles.locationRowTitle, { color: theme.text }]}>{loc.label}</Text>
+                        <Text style={[styles.locationRowSub, { color: theme.subtext }]}>
+                          {[loc.area, loc.city, loc.state, loc.pincode].filter(Boolean).join(' - ')}
+                        </Text>
+                      </View>
+                      <Pressable
+                        style={styles.locationRemoveBtn}
+                        hitSlop={8}
+                        onPress={() => confirmRemoveLocation(loc)}
+                        accessibilityRole="button"
+                        accessibilityLabel={`Remove ${loc.label}`}
+                      >
+                        <Text style={styles.locationRemoveBtnText}>Remove</Text>
+                      </Pressable>
+                    </View>
                   </Pressable>
                 ))
               )}
@@ -7632,10 +7708,25 @@ function MainApp() {
                   ]}
                   onPress={() => setDraftDeliveryLocation(loc)}
                 >
-                  <Text style={[styles.locationRowTitle, { color: theme.text }]}>{loc.label}</Text>
-                  <Text style={[styles.locationRowSub, { color: theme.subtext }]}>
-                    {[loc.area, loc.city, loc.state, loc.pincode].filter(Boolean).join(' - ')}
-                  </Text>
+                  <View style={styles.locationRowCardInner}>
+                    <View style={styles.locationRowTextWrap}>
+                      <Text style={[styles.locationRowTitle, { color: theme.text }]}>{loc.label}</Text>
+                      <Text style={[styles.locationRowSub, { color: theme.subtext }]}>
+                        {[loc.area, loc.city, loc.state, loc.pincode].filter(Boolean).join(' - ')}
+                      </Text>
+                    </View>
+                    {recentLocationIds.has(loc.id) ? (
+                      <Pressable
+                        style={styles.locationRemoveBtn}
+                        hitSlop={8}
+                        onPress={() => confirmRemoveLocation(loc)}
+                        accessibilityRole="button"
+                        accessibilityLabel={`Remove ${loc.label}`}
+                      >
+                        <Text style={styles.locationRemoveBtnText}>Remove</Text>
+                      </Pressable>
+                    ) : null}
+                  </View>
                 </Pressable>
               ))}
               {canShowMoreSuggestedLocations ? (
@@ -7682,6 +7773,13 @@ function MainApp() {
               </Pressable>
             </View>
           </SafeAreaView>
+          <MapLocationPicker
+            visible={isMapPickerVisible}
+            theme={theme}
+            initialCenter={mapPickerCenter}
+            onClose={() => setIsMapPickerVisible(false)}
+            onSave={handleMapLocationSave}
+          />
         </Modal>
         <Modal
           visible={isDetailModalVisible}

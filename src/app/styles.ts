@@ -620,6 +620,19 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: '800',
   },
+  mapPickBtn: {
+    borderRadius: 12,
+    backgroundColor: '#FFFFFF',
+    borderWidth: 1,
+    borderColor: '#9CA3AF',
+    alignItems: 'center',
+    paddingVertical: 11,
+  },
+  mapPickBtnText: {
+    color: '#111827',
+    fontSize: 16,
+    fontWeight: '800',
+  },
   locationSearchLoaderRow: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -669,6 +682,27 @@ const styles = StyleSheet.create({
   locationRowCardActive: {
     borderColor: '#22A447',
     backgroundColor: '#EFFAF2',
+  },
+  locationRowCardInner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  locationRowTextWrap: {
+    flex: 1,
+  },
+  locationRemoveBtn: {
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#FCA5A5',
+    backgroundColor: '#FEF2F2',
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+  },
+  locationRemoveBtnText: {
+    color: '#B91C1C',
+    fontSize: 13,
+    fontWeight: '800',
   },
   locationRowTitle: {
     color: '#111827',
