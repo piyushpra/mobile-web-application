@@ -18,6 +18,7 @@ class MainApplication : Application(), ReactApplication {
           add(AppInfoPackage())
           add(AppUpdateInstallerPackage())
           add(LocalImagePickerPackage())
+          add(DeviceLocationPackage())
         },
     )
   }

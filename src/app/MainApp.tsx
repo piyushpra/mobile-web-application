@@ -58,6 +58,7 @@ import {
   type AppUpdateDownloadEvent,
 } from './appUpdateInstaller';
 import { downloadDocumentToDevice, isDocumentDownloaderAvailable } from './documentDownloader';
+import { getDeviceCurrentPosition, hasNativeDeviceLocation, requestEnableDeviceLocation } from './deviceLocation';
 import styles from './styles';
 import type {
   AdminApiHealthStatus,
@@ -2661,11 +2662,20 @@ function MainApp() {
 
   const showEnableLocationAlert = () => {
     Alert.alert(
-      'Enable Location',
-      'Device location is turned off. Please enable Location/GPS and try again.',
+      'Turn On Location',
+      'Device location is turned off. Turn it on to detect your delivery address automatically, or search your city/pincode instead.',
       [
-        { text: 'Cancel', style: 'cancel' },
-        { text: 'Open Settings', onPress: () => Linking.openSettings() },
+        { text: 'Not Now', style: 'cancel' },
+        {
+          text: 'Turn On',
+          onPress: () => {
+            if (hasNativeDeviceLocation()) {
+              void detectCurrentLocation();
+            } else {
+              void Linking.openSettings();
+            }
+          },
+        },
       ],
     );
   };
@@ -3064,9 +3074,9 @@ function MainApp() {
   const detectCurrentLocation = async () => {
     try {
       setIsDetectingLocation(true);
-      // No geolocation module is bundled, so skip the OS permission prompt and use network lookup.
       const nav = (globalThis as any).navigator;
-      if (!nav?.geolocation?.getCurrentPosition) {
+      const useNativeLocation = hasNativeDeviceLocation();
+      if (!useNativeLocation && !nav?.geolocation?.getCurrentPosition) {
         await detectLocationByNetwork();
         return;
       }
@@ -3107,13 +3117,28 @@ function MainApp() {
         }
       }
 
-      const position = await new Promise<any>((resolve, reject) => {
-        nav.geolocation.getCurrentPosition(resolve, reject, {
-          enableHighAccuracy: true,
-          timeout: 12000,
-          maximumAge: 10000,
-        });
-      });
+      if (useNativeLocation) {
+        const enableResult = await requestEnableDeviceLocation();
+        if (enableResult === 'settings_opened') {
+          setError('Turn on Location in settings, then tap Detect again.');
+          return;
+        }
+        if (enableResult === 'denied') {
+          showEnableLocationAlert();
+          setError('Location is off. Turn it on or search your city/pincode.');
+          return;
+        }
+      }
+
+      const position = useNativeLocation
+        ? { coords: await getDeviceCurrentPosition(12000) }
+        : await new Promise<any>((resolve, reject) => {
+            nav.geolocation.getCurrentPosition(resolve, reject, {
+              enableHighAccuracy: true,
+              timeout: 12000,
+              maximumAge: 10000,
+            });
+          });
       const lat = Number(position?.coords?.latitude);
       const lng = Number(position?.coords?.longitude);
 

@@ -58,8 +58,8 @@ react {
  * Set this to true to Run Proguard on Release builds to minify the Java bytecode.
  */
 def enableProguardInReleaseBuilds = true
-def trackedVersionCode = 4
-def trackedVersionName = "1.0.3"
+def trackedVersionCode = 5
+def trackedVersionName = "1.0.4"
 def releaseVersionCode = project.hasProperty('VERSION_CODE_OVERRIDE')
     ? Integer.parseInt(String.valueOf(VERSION_CODE_OVERRIDE))
     : trackedVersionCode
@@ -134,6 +134,7 @@ android {
 dependencies {
     // The version of react-native is set by the React Native Gradle Plugin
     implementation("com.facebook.react:react-android")
+    implementation("com.google.android.gms:play-services-location:21.3.0")
 
     if (hermesEnabled.toBoolean()) {
         implementation("com.facebook.react:hermes-android")
